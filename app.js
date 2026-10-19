@@ -75,7 +75,25 @@ const L = {
   think: ['让我想想……哈啊……', '嗯……对面在想下一步了哦。'],
   hint: m => `指挥官，试试 ${m} 吧……我只说一次哦~`,
   undo: ['悔棋了哦……这次就当没发生吧~'],
-  low: ['指挥官，时间不多了哦，快一点吧~']
+  low: ['指挥官，时间不多了哦，快一点吧~'],
+  // —— 通用语音句（气泡显示具体内容时，音频播这些）/ 局势心情 / 触摸 / 长考 / 催促 ——
+  hintG: ["这样下吧……我只说一次哦~", "试试这里吧~", "嗯……这步应该不错哦。"],
+  openG: ["是熟悉的开局呢~", "这个开局我知道哦。"],
+  reviewMove: ["这步还可以更好哦……下次注意吧~"],
+  adv: ["哼哼~这局是我的了哦。", "指挥官，要不要现在认输呀？", "嘿嘿，这就是空想级的实力~", "再这样下去，我边睡午觉边下都能赢~", "不行不行，指挥官要再加油哦~"],
+  dis: ["刚才那步不算！", "指挥官……让我悔一步嘛~", "哼，我才没有输呢！", "Zzz……我睡着了，什么都没看见……", "不理你了啦！", "这、这是战术性撤退！"],
+  even: ["嗯……势均力敌呢。", "还早还早，慢慢来~"],
+  touchHead: ["嘿嘿……再摸一下也可以哦~", "呼啊……被摸头好舒服……"],
+  touchCheek: ["唔！不要戳我的脸啦~", "哼，脸都被戳鼓了……"],
+  touchHand: ["手、手吗……那就牵一下下吧……", "指挥官的手好暖和……"],
+  touchOrn: ["发饰不可以乱碰哦~", "这、这个是很重要的东西！"],
+  touchOther: ["指挥官？", "嗯？有什么事吗？"],
+  touchAngry: ["够了啦！再戳我就生气了！", "呜……指挥官好坏~"],
+  think2: ["嗯……让我想想……", "这里……还是那里呢……", "唔，有点难呢……"],
+  urgeSoft: ["指挥官？还在想吗~", "哈啊……我都快睡着了……"],
+  urgeHard: ["指挥官还没好吗~", "再不下我就要睡午觉了哦！"],
+  urgeAdv: ["慢慢想也没用哦，哼哼~", "想好怎么认输了吗？"],
+  urgeDis: ["指挥官~快一点嘛~", "呜……别让我等太久嘛……"]
 };
 const pick = a => a[Math.floor(Math.random() * a.length)];
 let mood = 'sleepy', frame = 0, tick2 = 0;
@@ -90,9 +108,11 @@ function drawAvatar() {
   drawGrid(c, blink ? blinkFrame(mood) : lemalin(mood, frame), 4);
 }
 setInterval(() => { tick2++; frame = tick2 % 2; if (artPixel()) drawAvatar(); }, 700);
-function say(t, m = 'sleepy') {
-  $('#bubble').textContent = t; mood = m; drawAvatar();
-  const dur = voice.play(t);            // 0 = 无音频/未解锁/关闭 → 文字口型
+let lastSayAt = 0;
+/** t：气泡文字；vt：要播放的语音句（默认同 t；动态内容气泡用通用句） */
+function say(t, m = 'sleepy', vt = null) {
+  $('#bubble').textContent = t; mood = m; drawAvatar(); lastSayAt = performance.now();
+  const dur = voice.play(vt || t);            // 0 = 无音频/未解锁/关闭 → 文字口型
   if (lm && lm.loaded && lm.visible) {
     if (dur) lm.stopSpeak();            // 口型改由 voice.onAmp → setMouthFromAudio
     else lm.speak(t);
@@ -268,11 +288,11 @@ function bookTalk(mv, byMe) {
   const nm = best ? best.name : '';
   if (inBook && best) {
     const sug = nextMoves.length ? ` 谱着上接下来可以走 ${nextMoves.slice(0, 3).map(x => x[0]).join(' / ')} 吧~` : '';
-    if (byMe) say(`指挥官，你走的是${nm}哦~`, 'happy');
-    else say(`我回了 ${mv.san}，现在是${nm}哦~${game.turn() === me ? sug : ''}`, 'smug');
+    if (byMe) say(`指挥官，你走的是${nm}哦~`, 'happy', pick(L.openG));
+    else say(`我回了 ${mv.san}，现在是${nm}哦~${game.turn() === me ? sug : ''}`, 'smug', pick(L.openG));
   } else if (wasInBook && game.history().length > 1) {
     wasInBook = false;
-    say(`哈啊……从${byMe ? '指挥官这步' : '这里'}开始就离开谱着了哦，要靠自己想了吧~`, 'yawn');
+    say(`哈啊……从${byMe ? '指挥官这步' : '这里'}开始就离开谱着了哦，要靠自己想了吧~`, 'yawn', '哈啊……从这里开始就离开谱着了哦，要靠自己想了吧~');
   }
   if (!inBook) wasInBook = false;
 }
@@ -314,6 +334,7 @@ async function afterMove(mv, byMe, fenBefore) {
     const q = inBook && idx < 20 ? 'book' : loss <= 20 ? 'best' : loss <= 60 ? 'good' : loss <= 150 ? 'inacc' : loss <= 300 ? 'mist' : 'blun';
     meta[idx].q = q; meta[idx].loss = loss;
     renderMoves(); renderEval();
+    updateMood(cpW, byMe);
     if (byMe && $('#liveFb').checked) {
       const [n] = QN[q];
       $('#fbLast').innerHTML = `你的 <b>${mv.san}</b>：<span class="${QN[q][1]}">${n}</span>${q !== 'book' && q !== 'best' ? `（损失约 ${(loss / 100).toFixed(1)} 兵）` : ''}`;
@@ -327,13 +348,40 @@ async function afterMove(mv, byMe, fenBefore) {
   await ev;
 }
 
+/** 像真人一样的思考时间（毫秒）：开局快、普通 2–5s、复杂/评估波动时偶尔 8–15s；剩余时间少时缩短 */
+function humanThinkMs() {
+  if ($('#pace').value === 'fast') return 250;
+  const ply = game.history().length, rnd = (a, b) => a + Math.random() * (b - a);
+  let ms;
+  if (ply < 8 && bookMatch().inBook) ms = rnd(700, 1800);
+  else if (ply < 6) ms = rnd(900, 2200);
+  else {
+    const e = evals.filter(x => x !== undefined), swing = e.length > 2 ? Math.abs(e[e.length - 1] - e[e.length - 3]) : 0;
+    const complex = game.moves().length > 34 || swing > 120 || game.inCheck();
+    ms = complex && Math.random() < 0.3 ? rnd(8000, 15000) : rnd(2000, 5000);
+  }
+  if (timed) {
+    const her = me === 'w' ? 'b' : 'w', left = clock[her];
+    ms = Math.min(ms, Math.max(300, left * 0.05));   // 不把自己的钟耗光
+    if (left < 15000) ms = Math.min(ms, 600);
+  }
+  return ms;
+}
 async function engineMove(my) {
   const lvl = +$('#lvl').value, useElo = $('#useElo').checked;
   const mt = 150 + lvl * 60;
-  say(pick(L.think), 'yawn');
+  const thinkMs = humanThinkMs();
+  if (Math.random() < 0.35 || thinkMs > 7000) say(pick(L.think), 'yawn');
   lm?.react('think');
-  await new Promise(r => setTimeout(r, 250));
+  if (thinkMs > 2500) setTimeout(() => { if (my === token && running && game.turn() !== me) lm?.react(pick(['thinkTap', 'thinkTilt', 'thinkFrown'])); }, 600);
+  if (thinkMs > 7000) {
+    setTimeout(() => { if (my === token && running && game.turn() !== me) { say(pick(L.think2), 'yawn'); lm?.react('thinkTilt'); } }, thinkMs * 0.45);
+    setTimeout(() => { if (my === token && running && game.turn() !== me) lm?.react(pick(['thinkTap', 'thinkFrown'])); }, thinkMs * 0.75);
+  }
+  const t0 = performance.now();
   const r = await player.analyze(game.fen(), { movetime: mt, skill: lvl, elo: useElo ? +$('#elo').value : null });
+  const rest = thinkMs - (performance.now() - t0);
+  if (rest > 0) await new Promise(res => setTimeout(res, rest));
   lm?.react('idle');
   if (my !== token || !running) return;
   const fenBefore = game.fen();
@@ -386,7 +434,7 @@ function summary(res, why) {
 }
 
 $('#newGame').onclick = () => {
-  token++; game = new Chess(); startFen = game.fen(); exitReview();
+  token++; game = new Chess(); startFen = game.fen(); exitReview(); moodState = 'even'; lm?.setMood('even'); resetUrge();
   wasInBook = true; meta = []; evals = [0]; sel = null; arrow = null; lowWarned = false; moveBusy = false;
   $('#summary').hidden = true; $('#fbLast').textContent = ''; $('#promo').hidden = true;
   const sv = $('#side').value;
@@ -414,7 +462,7 @@ $('#hint').onclick = async () => {
   arrow = r.best;
   const t = new Chess(game.fen());
   const m = t.move({ from: r.best.slice(0, 2), to: r.best.slice(2, 4), promotion: r.best[4] });
-  say(L.hint(m ? m.san : r.best), 'smug');
+  say(L.hint(m ? m.san : r.best), 'smug', pick(L.hintG));
   renderUI();
 };
 $('#undo').onclick = () => {
@@ -502,7 +550,8 @@ async function startReview() {
   $('#rvPct').textContent = `分析完成 · 白方准确度 ${rv.accW}% · 黑方准确度 ${rv.accB}%`;
   drawGraph(); keyMoments(); gotoPly(0);
   const bad = moves.filter(x => (x.q === 'blun' || x.q === 'mist') && x.color === me).length;
-  say(bad ? `看完了哦，指挥官有 ${bad} 处比较大的失误，我在下面标出来了，点一下就能跳过去吧~` : '看完了哦……指挥官这局几乎没有大失误，好厉害，我可以安心睡了吧~', bad ? 'smug' : 'happy');
+  say(bad ? `看完了哦，指挥官有 ${bad} 处比较大的失误，我在下面标出来了，点一下就能跳过去吧~` : '看完了哦……指挥官这局几乎没有大失误，好厉害，我可以安心睡了吧~', bad ? 'smug' : 'happy',
+    bad ? '看完了哦，指挥官有几处比较大的失误，我在下面标出来了，点一下就能跳过去吧~' : null);
 }
 function drawGraph() {
   const n = rv.res.length, W = 600, H = 120;
@@ -538,7 +587,7 @@ function gotoPly(p) {
       (m.q !== 'best' && m.q !== 'book' && m.bestSan ? `，更好的是 <b>${m.bestSan}</b>（青色箭头）` : '') +
       ` · 局面评估 ${fmtEval(rv.res[view].cpW)}`;
     if (m.color === me && (m.q === 'blun' || m.q === 'mist'))
-      say(`这步 ${m.san} 是${QN[m.q][0]}哦……${m.bestSan ? '走 ' + m.bestSan + ' 会好很多' : ''}，下次注意吧~`, 'shock');
+      say(`这步 ${m.san} 是${QN[m.q][0]}哦……${m.bestSan ? '走 ' + m.bestSan + ' 会好很多' : ''}，下次注意吧~`, 'shock', pick(L.reviewMove));
     else if (m.color === me && m.q === 'best') say('这步走得好哦，和我想的一样~', 'happy');
   } else $('#rvInfo').textContent = '初始局面 · 用 ← → 或按钮逐步查看';
   const c = document.getElementById('rvCursor');
@@ -620,6 +669,75 @@ $('#pgnClose').onclick = () => $('#pgnModal').hidden = true;
 
 window.__dbg3d = { game: () => game, board3d, meta: () => meta };
 
+/* ---------- 局势心情：她优势臭屁 / 劣势耍赖 ---------- */
+let moodState = 'even', moodSaidAt = 0;
+function updateMood(cpW, byMe) {
+  const her = me === 'w' ? 'b' : 'w';
+  const herCp = her === 'w' ? cpW : -cpW;
+  const st = herCp > 150 ? 'adv' : herCp < -150 ? 'dis' : 'even';
+  const changed = st !== moodState;
+  moodState = st; lm?.setMood(st);
+  const now = performance.now();
+  if (!running || now - moodSaidAt < 22000) return;
+  if (!changed && Math.random() > 0.18) return;
+  moodSaidAt = now;
+  const fire = () => {
+    if (!running || performance.now() - lastSayAt < 1500) return;   // 不抢刚说的话
+    if (st === 'adv') { say(pick(L.adv), 'smug'); lm?.react(pick(['advHips', 'advChin', 'advWag', 'advLegs'])); }
+    else if (st === 'dis') { say(pick(L.dis), 'shock'); lm?.react(pick(['disPout', 'disTurn', 'disSleep', 'disBeg'])); }
+    else if (changed) { say(pick(L.even), 'sleepy'); lm?.react('nod'); }
+  };
+  setTimeout(fire, byMe ? 2600 : 1800);
+}
+
+/* ---------- 指挥官长考时催促（有冷却） ---------- */
+let turnStartAt = performance.now(), urgeLevel = 0, urgeSoftAt = 25000, urgeHardAt = 52000, lastUrgeAt = 0;
+function resetUrge() {
+  turnStartAt = performance.now(); urgeLevel = 0;
+  urgeSoftAt = 20000 + Math.random() * 10000; urgeHardAt = 45000 + Math.random() * 15000;
+}
+document.addEventListener('pointerdown', () => { if (urgeLevel === 0) turnStartAt = performance.now(); }, { capture: true, passive: true });
+setInterval(() => {
+  if (!running || view !== null || moveBusy || game.turn() !== me) { if (game.turn() !== me) resetUrge(); return; }
+  const idle = performance.now() - turnStartAt, now = performance.now();
+  if (now - lastUrgeAt < 25000) return;
+  if (timed && clock[me] < 20000) return;   // 时间紧时别添乱
+  if (urgeLevel === 0 && idle > urgeSoftAt) {
+    urgeLevel = 1; lastUrgeAt = now;
+    lm?.react(pick(['urgeTap', 'yawn', 'thinkTilt', 'advLegs']));
+    if (now - lastSayAt > 6000) say(pick(moodState === 'adv' ? L.urgeAdv : moodState === 'dis' ? L.urgeDis : L.urgeSoft), 'sleepy');
+  } else if (urgeLevel === 1 && idle > urgeHardAt) {
+    urgeLevel = 2; lastUrgeAt = now;
+    lm?.react(moodState === 'dis' ? 'disBeg' : 'urgePoke');
+    say(pick(moodState === 'adv' ? L.urgeAdv : moodState === 'dis' ? L.urgeDis : L.urgeHard), moodState === 'adv' ? 'smug' : 'shock');
+  }
+}, 1000);
+
+/* ---------- 触摸她（主画面未点到棋盘格时 / 右侧头像） ---------- */
+let touchLog = [], lastTouchAt = 0;
+function onTouchLm(region) {
+  if (!region || !lm) return;
+  const now = performance.now();
+  if (now - lastTouchAt < 450) return;
+  lastTouchAt = now;
+  touchLog = touchLog.filter(t => now - t < 4000); touchLog.push(now);
+  const angry = touchLog.length >= 4;
+  lm.touch(region, angry);
+  const key = angry ? 'touchAngry' : { head: 'touchHead', cheek: 'touchCheek', hand: 'touchHand', orn: 'touchOrn' }[region] || 'touchOther';
+  say(pick(L[key]), angry ? 'shock' : region === 'head' ? 'happy' : region === 'cheek' ? 'shock' : 'sleepy');
+  if (angry) touchLog = [];
+}
+board3d.onMissClick = rc => { if (lm && lm.loaded && lm.visible) onTouchLm(lm.pickRay(rc)); };
+$('#avatar3d').addEventListener('pointerup', e => { if (lm && lm.loaded) onTouchLm(lm.pickAvatar(e)); });
+
+/* ---------- 画质 / 节奏 ---------- */
+const defQ = matchMedia('(pointer: coarse)').matches ? 'std' : 'high';
+$('#quality').value = localStorage.lm3dQ || defQ;
+function applyQuality() { board3d.setQuality($('#quality').value); lm?.setQuality($('#quality').value); localStorage.lm3dQ = $('#quality').value; }
+$('#quality').onchange = applyQuality; applyQuality();
+$('#pace').value = localStorage.lm3dPace || 'human';
+$('#pace').onchange = () => { localStorage.lm3dPace = $('#pace').value; };
+
 /* ---------- 对面就座的恶毒（加密 MMD 模型，仅私人使用） ---------- */
 function syncAvatar() {
   const on = !!(lm && lm.loaded && $('#showLm').checked);
@@ -643,6 +761,7 @@ async function loadLemalin(pw) {
     lmStatus('恶毒已在对面就座 🌙', 'ok');
     lm.setVisible($('#showLm').checked);
     lm.attachAvatar($('#avatar3d'));
+    lm.setQuality($('#quality').value); lm.setMood(moodState);
     syncAvatar();
     voice.onAmp = amp => { if (lm && lm.loaded && lm.visible) lm.setMouthFromAudio({ amp }); };
     try { const n = await voice.load(pw); lmStatus('恶毒已在对面就座 🌙 · 语音 ' + n + ' 句', 'ok'); }

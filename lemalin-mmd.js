@@ -172,12 +172,7 @@ export class LemalinMMD {
     mesh.receiveShadow = false;
     mesh.frustumCulled = false;
     // 材质：保持卡通着色，但别被场景雾/色调映射洗得太灰
-    const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
-    for (const m of mats) {
-      m.fog = true;
-      if (m.map) m.map.anisotropy = 4;
-      if (m.color) m.color.multiplyScalar(0.86);   // 月夜里稍暗一点，不要发白
-    }
+    this._toonify(mesh);
     this.mesh = mesh;
     for (const b of mesh.skeleton.bones) this.bones[b.name] = b;
     this.morph = mesh.morphTargetDictionary || {};
@@ -199,6 +194,144 @@ export class LemalinMMD {
     this.board.setEngineColor(this.board.engineColor);
     this.board.onFrame.push(this._frame);
   }
+
+  /* ---------------- 赛璐璐渲染 ----------------
+   * MMDToonMaterial（包里没有自定义 toon/sphere 贴图）→ MeshToonMaterial：
+   * 三阶渐变阴影（脸用两阶、阴影更浅更干净）、sRGB 贴图 + 各向异性、菲涅尔边缘光、
+   * 反法线外壳描线（共用骨骼与 morph，头像同样生效）
+   */
+  static _ramp(steps) {
+    const data = new Uint8Array(steps.length * 4);
+    steps.forEach((v, i) => { const c = Math.round(v * 255); data.set([c, c, c, 255], i * 4); });
+    const t = new THREE.DataTexture(data, steps.length, 1, THREE.RGBAFormat);
+    t.minFilter = t.magFilter = THREE.NearestFilter; t.generateMipmaps = false; t.needsUpdate = true;
+    return t;
+  }
+  _toonify(mesh) {
+    const maxAniso = this.board.renderer.capabilities.getMaxAnisotropy?.() || 4;
+    const rampBody = LemalinMMD._ramp([0.62, 0.84, 1.0]);
+    const rampFace = LemalinMMD._ramp([0.86, 1.0]);
+    const rim = { value: new THREE.Color(0xbfd4ff) };
+    this._rimUniform = rim;
+    const old = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+    const OUTLINE = { Body: 1, Hair: 1, Body_Metal: 0.8, '坠饰': 0.7, '领带': 0.8, belt: 0.8, wings: 1, Face: 0.6 };
+    const mats = old.map(m => {
+      const name = (m.name || '').trim();
+      const isFace = name === 'Face' || name.startsWith('eye') || name === 'Face_Brow';
+      const isEye = name.startsWith('eye') || name === 'Face_Brow';
+      if (m.map) { m.map.colorSpace = THREE.SRGBColorSpace; m.map.anisotropy = Math.min(8, maxAniso); m.map.needsUpdate = true; }
+      const t = new THREE.MeshToonMaterial({
+        name, map: m.map || null, color: (m.color ? m.color.clone() : new THREE.Color(1, 1, 1)).multiplyScalar(isFace ? 1.0 : 0.96),
+        gradientMap: isFace ? rampFace : rampBody,
+        transparent: m.transparent || isEye, opacity: m.opacity ?? 1, alphaTest: isEye ? 0.02 : (m.alphaTest || 0),
+        side: m.side, depthWrite: m.depthWrite, fog: true,
+        emissive: new THREE.Color(isFace ? 0x1c1a26 : 0x14152a),
+      });
+      t.userData.lmName = name;
+      t.userData.outline = OUTLINE[name] || 0;
+      if (!isEye) {
+        t.onBeforeCompile = sh => {
+          sh.uniforms.uRim = rim;
+          sh.fragmentShader = sh.fragmentShader
+            .replace('#include <common>', '#include <common>\nuniform vec3 uRim;')
+            .replace('#include <opaque_fragment>', `
+              float lmF = 1.0 - clamp(dot(normalize(vViewPosition), normal), 0.0, 1.0);
+              float lmRim = smoothstep(0.62, 0.92, lmF);
+              outgoingLight += uRim * lmRim * ${isFace ? '0.10' : '0.22'};
+              #include <opaque_fragment>`);
+        };
+      }
+      m.dispose?.();
+      return t;
+    });
+    mesh.material = mats;
+    // 描线：反法线外壳
+    const lineMat = w => {
+      const lm = new THREE.MeshBasicMaterial({ color: 0x1a1430, side: THREE.BackSide, fog: true });
+      lm.onBeforeCompile = sh => {
+        sh.uniforms.uW = this._outlineW || (this._outlineW = { value: 0.028 });
+        sh.vertexShader = sh.vertexShader
+          .replace('#include <common>', '#include <common>\nuniform float uW;')
+          .replace('#include <begin_vertex>', `#include <begin_vertex>\n transformed += normalize(normal) * uW * ${w.toFixed(2)};`);
+      };
+      lm.customProgramCacheKey = () => 'lmline' + w;
+      return lm;
+    };
+    const hidden = new THREE.MeshBasicMaterial({ visible: false });
+    const cache = {};
+    const lineMats = mats.map(m => m.userData.outline ? (cache[m.userData.outline] ||= lineMat(m.userData.outline)) : hidden);
+    const outline = new THREE.SkinnedMesh(mesh.geometry, lineMats);
+    outline.bind(mesh.skeleton, mesh.bindMatrix);
+    outline.morphTargetInfluences = mesh.morphTargetInfluences;
+    outline.morphTargetDictionary = mesh.morphTargetDictionary;
+    outline.frustumCulled = false;
+    outline.raycast = () => {};
+    outline.userData.isOutline = true;
+    mesh.add(outline);
+    this.outline = outline;
+  }
+  /** 画质：high/std 描线开，low 关 */
+  setQuality(q) { if (this.outline) this.outline.visible = q !== 'low'; }
+
+  /* ---------------- 触摸分区（raycast） ---------------- */
+  _region(hit) {
+    const name = hit.object.material?.[hit.face.materialIndex]?.userData?.lmName || '';
+    const head = this.bones['頭'], neck = this.bones['首'];
+    const p = hit.point;
+    const hp = head.getWorldPosition(new THREE.Vector3()), np = neck.getWorldPosition(new THREE.Vector3());
+    const hs = Math.max(0.2, hp.distanceTo(np) * 2.6);          // 头部尺度（世界单位）
+    for (const n of ['左手首', '右手首', '左中指１', '右中指１']) {
+      const b = this.bones[n]; if (b && b.getWorldPosition(new THREE.Vector3()).distanceTo(p) < hs * 0.6) return 'hand';
+    }
+    const up = new THREE.Vector3(0, 1, 0).applyQuaternion(head.getWorldQuaternion(new THREE.Quaternion()));
+    const dy = p.clone().sub(hp).dot(up) / hs;                   // 以头骨为原点、沿头顶方向
+    const dist = p.distanceTo(hp) / hs;
+    // 标定（hs≈头骨到颈骨×2.6）：眼睛 dy≈0.5，脸颊 dy<0.45，头顶 0.5–1.8，发团/发饰 >1.85
+    if (name === 'Face') return (p.y - hp.y) / hs < 0.36 ? 'cheek' : 'head';   // 用世界高度，低头时也稳定      // 脸部可见区多为脸颊/嘴；额头被刘海挡住
+    if (name.startsWith('eye') || name === 'Face_Brow') return 'head';
+    if (name === 'Hair' || name === '坠饰') {
+      const wy = (p.y - hp.y) / hs, horiz = Math.hypot(p.x - hp.x, p.z - hp.z) / hs;
+      if (dy > 2.0 && dist < 3.4) return 'orn';
+      if (wy < 0.36 && wy > -0.45 && horiz < 1.2) return 'cheek';   // 脸旁的鬓发：算戳脸
+      if (wy <= -0.45) return 'other';                                  // 垂到身上的长发
+      if (dist < 3.0) return 'head';
+    }
+    return 'other';
+  }
+  /** 主画面：射线（board3d 已设置好） → 分区；未命中返回 null */
+  pickRay(raycaster) {
+    if (!this.mesh || !this.visible) return null;
+    this.mesh.updateMatrixWorld(true);
+    this.mesh.computeBoundingSphere();
+    const hits = raycaster.intersectObject(this.mesh, false);
+    return hits.length ? this._region(hits[0]) : null;
+  }
+  /** 右侧头像画布点击 */
+  pickAvatar(ev) {
+    const av = this.avatar; if (!av) return null;
+    const r = av.canvas.getBoundingClientRect();
+    const v = new THREE.Vector2(((ev.clientX - r.left) / r.width) * 2 - 1, -((ev.clientY - r.top) / r.height) * 2 + 1);
+    const rc = new THREE.Raycaster(); rc.setFromCamera(v, av.camera);
+    const vis = this.board.actorRoot.visible; this.board.actorRoot.visible = true;
+    const res = this.pickRay(rc); this.board.actorRoot.visible = vis;
+    return res;
+  }
+  /** 触摸反应（动作 + 表情）；台词由 app 负责 */
+  touch(region, angry = false) {
+    if (!this.mesh) return;
+    if (angry) { this._face(['怒り', '∧', 'じと目'], 2.2, 0.85); this._playGest('pout', 2.2); return; }
+    const R = {
+      head: [['なごみ', '笑い', '口角上げ'], 2.6, 0.95, 'headpat'],
+      cheek: [['怒り', '∧'], 2.0, 0.7, 'pout'],
+      hand: [['困る', 'にこり'], 2.4, 0.7, 'shy'],
+      orn: [['びっくり', '困る'], 1.8, 0.8, 'coverHead'],
+      other: [['真面目'], 1.4, 0.5, 'tiltHead'],
+    }[region] || [['真面目'], 1.4, 0.5, 'tiltHead'];
+    this._face(R[0], R[1], R[2]);
+    this.gest = null; this._playGest(R[3], R[1]);
+  }
+  /** 局势心情：adv（她优势）| even | dis（她劣势） */
+  setMood(m) { this.moodState = m; }
 
   /** 椅子：月夜风深蓝木椅 + 淡紫坐垫 */
   _makeChair() {
@@ -517,11 +650,27 @@ export class LemalinMMD {
       smug: { names: ['笑い', '口角上げ'], dur: 1.5, peak: 0.75, gest: 'smug' },
       start: { names: ['なごみ'], dur: 2.0, peak: 0.6, gest: 'settle' },
       yawn: { names: ['あ'], dur: 1.8, peak: 0.7, gest: 'yawn' },
+      // 优势：臭屁
+      advHips: { names: ['じと目', '口角上げ', '笑い'], dur: 2.8, peak: 0.6, gest: 'handsHips' },
+      advChin: { names: ['じと目', '口角上げ'], dur: 2.4, peak: 0.7, gest: 'chinUp' },
+      advWag: { names: ['ウィンク', '口角上げ'], dur: 2.4, peak: 0.8, gest: 'fingerWag' },
+      advLegs: { names: ['にこり', '口角上げ'], dur: 3.0, peak: 0.7, gest: 'legSwing' },
+      // 劣势：耍赖
+      disPout: { names: ['怒り', '∧', '困る'], dur: 2.6, peak: 0.8, gest: 'pout' },
+      disTurn: { names: ['怒り', 'じと目'], dur: 2.8, peak: 0.7, gest: 'turnAway' },
+      disSleep: { names: ['まばたき', 'なごみ'], dur: 3.2, peak: 1.0, gest: 'fakeSleep' },
+      disBeg: { names: ['困る', 'にこり'], dur: 2.4, peak: 0.8, gest: 'beg' },
+      // 长考 / 催促
+      thinkTap: { names: ['真面目'], dur: 2.6, peak: 0.6, gest: 'tapAir' },
+      thinkTilt: { names: ['真面目', '困る'], dur: 2.2, peak: 0.5, gest: 'tiltHead' },
+      thinkFrown: { names: ['真面目', '怒り'], dur: 2.2, peak: 0.45, gest: 'chin' },
+      urgeTap: { names: ['じと目'], dur: 2.6, peak: 0.5, gest: 'tapTable' },
+      urgePoke: { names: ['怒り', '∧'], dur: 2.6, peak: 0.75, gest: 'poke' },
     };
     const m = face[kind];
     if (!m) return;
     this._face(m.names, m.dur, m.peak);
-    if (m.gest) this._playGest(m.gest, m.dur);
+    if (m.gest) { if (this.gest && !this.grab.active) this.gest = null; this._playGest(m.gest, m.dur); }
     this.tiltTarget = 0;
   }
 
@@ -537,9 +686,12 @@ export class LemalinMMD {
   }
 
   _pickIdle() {
+    const mood = this.moodState || 'even';
     const pool = this.mode === 'think'
-      ? ['chin', 'sigh', 'lookBoard', 'lookPlayer']
-      : ['stretch', 'chin', 'swingFoot', 'lookBoard', 'lookPlayer', 'yawn', 'wink'];
+      ? ['chin', 'tapAir', 'tiltHead', 'lookBoard', 'lookPlayer', 'chin', 'sigh']
+      : mood === 'adv' ? ['handsHips', 'chinUp', 'legSwing', 'fingerWag', 'wink', 'stretch', 'lookPlayer', 'swingFoot']
+      : mood === 'dis' ? ['pout', 'turnAway', 'sigh', 'chin', 'fakeSleep', 'lookBoard', 'swingFoot']
+      : ['stretch', 'chin', 'swingFoot', 'lookBoard', 'lookPlayer', 'yawn', 'wink', 'tiltHead', 'legSwing'];
     return pool[(Math.random() * pool.length) | 0];
   }
 
@@ -609,6 +761,67 @@ export class LemalinMMD {
       A('L', [0.1 * env, 0, -0.15 * env]); A('R', [0.1 * env, 0, 0.15 * env]);
     } else if (n === 'wink') {
       this._setMorph('ウィンク', env * 0.9);
+    } else if (n === 'handsHips') {
+      // 叉腰：上臂外展后摆，肘外翻，手背到腰
+      A('L', [-0.35 * env, 0.35 * env, -0.55 * env]); A('R', [-0.35 * env, -0.35 * env, 0.55 * env]);
+      o.elbL = -1.25 * env; o.elbR = -1.25 * env; o.wristL = -0.4 * env; o.wristR = 0.4 * env;
+      o.lean = -0.12 * env; o.headP = -0.16 * env;
+    } else if (n === 'chinUp') {
+      o.headP = -0.32 * env; o.lean = -0.1 * env;
+      this.tiltTarget = -0.1 * env;
+      A('L', [-0.2 * env, 0.3 * env, -0.45 * env]); o.elbL = -1.1 * env;
+    } else if (n === 'fingerWag') {
+      A('R', [0.75 * env, -0.25 * env, 0.55 * env]); o.elbR = -1.35 * env;
+      o.wristR = 0.45 * Math.sin(u * Math.PI * 9) * env;
+      o.headP = -0.1 * env; this.tiltTarget = 0.12 * Math.sin(u * Math.PI * 4.5) * env;
+    } else if (n === 'legSwing') {
+      const w = Math.sin(u * Math.PI * 6) * env;
+      o.hipL = 0.45 * w; o.hipR = -0.45 * w; o.lean = -0.05 * env;
+      this.tiltTarget = 0.1 * Math.sin(u * Math.PI * 3) * env;
+    } else if (n === 'pout') {
+      // 鼓脸 + 抱臂
+      A('L', [0.55 * env, 0.45 * env, -0.5 * env]); A('R', [0.55 * env, -0.45 * env, 0.5 * env]);
+      o.elbL = -1.7 * env; o.elbR = -1.7 * env;
+      o.headP = 0.06 * env; this.tiltTarget = 0.16 * env;
+      this._setMorph('□', 0.0);
+    } else if (n === 'turnAway') {
+      this.lookYawTarget = 0.75 * env; o.leanY = 0.22 * env; o.headP = -0.08 * env;
+      A('L', [0.5 * env, 0.4 * env, -0.5 * env]); A('R', [0.5 * env, -0.4 * env, 0.5 * env]);
+      o.elbL = -1.6 * env; o.elbR = -1.6 * env;
+    } else if (n === 'fakeSleep') {
+      o.headP = 0.32 * env; o.lean = 0.12 * env; this.tiltTarget = 0.28 * env;
+      A('L', [0.2 * env, 0, -0.25 * env]); A('R', [0.2 * env, 0, 0.25 * env]);
+    } else if (n === 'beg') {
+      // 双手合十拜托
+      A('L', [0.9 * env, 0.35 * env, -0.45 * env]); A('R', [0.9 * env, -0.35 * env, 0.45 * env]);
+      o.elbL = -1.5 * env; o.elbR = -1.5 * env; o.headP = 0.1 * env;
+      this.tiltTarget = 0.18 * Math.sin(u * Math.PI * 2) * env;
+    } else if (n === 'tapAir') {
+      // 手指在棋盘上方点点
+      A('R', [0.9 * env, -0.15 * env, 0.35 * env]); o.elbR = -0.55 * env;
+      o.wristR = (0.15 + 0.25 * Math.abs(Math.sin(u * Math.PI * 7))) * env;
+      o.headP = 0.22 * env; o.lean = 0.1 * env;
+    } else if (n === 'tiltHead') {
+      this.tiltTarget = 0.3 * env * (u < 0.5 ? 1 : 0.8); o.headP = 0.04 * env;
+    } else if (n === 'tapTable') {
+      A('R', [0.75 * env, -0.1 * env, 0.4 * env]); o.elbR = -0.45 * env;
+      o.wristR = 0.35 * Math.abs(Math.sin(u * Math.PI * 8)) * env;
+      o.headP = -0.06 * env; this.tiltTarget = 0.14 * env;
+    } else if (n === 'poke') {
+      // 伸手点点指挥官
+      A('R', [1.15 * env, -0.25 * env, 0.25 * env]); o.elbR = -0.25 * env;
+      o.wristR = 0.25 * Math.sin(u * Math.PI * 8) * env;
+      o.lean = 0.16 * env; o.headP = -0.06 * env;
+    } else if (n === 'headpat') {
+      o.lean = 0.1 * env; o.headP = 0.16 * env; this.tiltTarget = 0.18 * Math.sin(u * Math.PI * 3) * env;
+      A('L', [0.25 * env, 0, -0.3 * env]); A('R', [0.25 * env, 0, 0.3 * env]);
+    } else if (n === 'shy') {
+      this.lookYawTarget = -0.35 * env; o.headP = 0.2 * env; this.tiltTarget = 0.14 * env;
+      A('L', [0.45 * env, 0.4 * env, -0.45 * env]); A('R', [0.45 * env, -0.4 * env, 0.45 * env]);
+      o.elbL = -1.2 * env; o.elbR = -1.2 * env;
+    } else if (n === 'coverHead') {
+      A('L', [1.4 * env, 0.2 * env, -0.7 * env]); A('R', [1.4 * env, -0.2 * env, 0.7 * env]);
+      o.elbL = -1.9 * env; o.elbR = -1.9 * env; o.headP = 0.12 * env;
     }
   }
 
@@ -637,10 +850,13 @@ export class LemalinMMD {
       this.nextIdle -= dt;
       if (this.nextIdle <= 0) {
         const g = this._pickIdle();
-        const dur = g === 'swingFoot' ? 2.8 : g === 'stretch' ? 2.4 : 1.8 + Math.random();
+        const dur = g === 'swingFoot' || g === 'legSwing' ? 3.0 : g === 'stretch' ? 2.6 : g === 'fakeSleep' ? 3.4 : 2.0 + Math.random();
         this._playGest(g, dur);
-        if (g === 'yawn') this._face(['あ', 'なごみ'], 1.6, 0.75);
-        this.nextIdle = (this.mode === 'think' ? 3.5 : 5.5) + Math.random() * 4;
+        const F = { yawn: [['あ', 'なごみ'], 0.75], wink: null, handsHips: [['じと目', '口角上げ'], 0.55], chinUp: [['じと目', '口角上げ'], 0.6],
+          fingerWag: [['ウィンク', '口角上げ'], 0.7], pout: [['怒り', '∧'], 0.7], turnAway: [['怒り', 'じと目'], 0.6], fakeSleep: [['まばたき'], 1.0],
+          tiltHead: [['真面目'], 0.4], tapAir: [['真面目'], 0.5], legSwing: [['にこり'], 0.5] }[g];
+        if (F) this._face(F[0], dur, F[1]);
+        this.nextIdle = (this.mode === 'think' ? 2.2 : 3.2) + Math.random() * 3;
       }
     }
     if (this.gest) {
@@ -649,6 +865,7 @@ export class LemalinMMD {
       this._evalGest(u);
       if (u >= 1) {
         if (this.gest.name === 'wink') this._setMorph('ウィンク', 0);
+        if (!this.grab.active) { this.lookYawTarget = 0; this.tiltTarget = this.mode === 'think' ? 0.14 : 0; }
         this.gest = null;
         // 清 poseOff
         Object.assign(this.poseOff, { lean: 0, leanY: 0, armL: [0,0,0], armR: [0,0,0], elbL: 0, elbR: 0, wristL: 0, wristR: 0, hipL: 0, hipR: 0, headP: 0 });

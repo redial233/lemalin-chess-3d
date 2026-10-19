@@ -13,8 +13,8 @@ from cryptography.hazmat.primitives import hashes
 
 ITER = 250_000
 W = '/workspace/lemalin-voice'
-LINES = os.environ.get('VOICE_LINES', W + '/out/lines.json')
-PICK = os.environ.get('VOICE_PICK', W + '/gsv/pick.json')
+LINES = os.environ.get('VOICE_LINES', W + '/out/lines_all.json')
+PICK = os.environ.get('VOICE_PICK', W + '/gsv/pick_all.json')
 RW = os.environ.get('VOICE_REWRITE', W + '/gsv/rewrite.json')
 OUT = sys.argv[1] if len(sys.argv) > 1 else os.path.join(os.path.dirname(__file__), '..', 'models', 'voice.enc')
 pw = os.environ.get('CHESS_MODEL_PASSWORD') or sys.exit('CHESS_MODEL_PASSWORD 未设置')

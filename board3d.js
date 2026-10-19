@@ -1429,12 +1429,12 @@ export class Board3D {
     this.raycaster.setFromCamera(this.pointer, this.camera);
     const plane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
     const hit = new THREE.Vector3();
-    if (!this.raycaster.ray.intersectPlane(plane, hit)) return;
+    if (!this.raycaster.ray.intersectPlane(plane, hit)) { this.onMissClick?.(this.raycaster); return; }
     const local = hit.clone();
     this.boardGroup.worldToLocal(local);
     const f = Math.floor(local.x / SQ + 4);
     const r = Math.floor(4 - local.z / SQ);
-    if (f < 0 || f > 7 || r < 0 || r > 7) return;
+    if (f < 0 || f > 7 || r < 0 || r > 7) { this.onMissClick?.(this.raycaster); return; }
     this.onSquareClick(FILES[f] + (r + 1));
   }
 
@@ -1444,6 +1444,7 @@ export class Board3D {
     this.camera.aspect = w / h;
     this.camera.updateProjectionMatrix();
     this.renderer.setSize(w, h);
+    if (this.composer) this.composer.setSize(w, h);
   }
 
   _updateFx(dt) {
@@ -1503,13 +1504,40 @@ export class Board3D {
     }
   }
 
+  /** 画质：high = 描线 + 柔和泛光（不透明背景）；std = 描线；low = 无描线、像素比 1 */
+  async setQuality(q) {
+    this.quality = q;
+    this.renderer.setPixelRatio(q === 'low' ? 1 : Math.min(devicePixelRatio, 2));
+    this.renderer.shadowMap.enabled = q !== 'low';
+    if (q === 'high') {
+      if (!this.composer) {
+        const [{ EffectComposer }, { RenderPass }, { UnrealBloomPass }, { OutputPass }] = await Promise.all([
+          import('three/addons/postprocessing/EffectComposer.js'), import('three/addons/postprocessing/RenderPass.js'),
+          import('three/addons/postprocessing/UnrealBloomPass.js'), import('three/addons/postprocessing/OutputPass.js')]);
+        const w = this.container.clientWidth || 560, h = this.container.clientHeight || 560;
+        const c = new EffectComposer(this.renderer);
+        c.addPass(new RenderPass(this.scene, this.camera));
+        this.bloomPass = new UnrealBloomPass(new THREE.Vector2(w, h), 0.24, 0.4, 0.95);
+        c.addPass(this.bloomPass);
+        c.addPass(new OutputPass());
+        this.composer = c;
+      }
+      this.scene.background = new THREE.Color(0x070a18);
+      this.composer.setPixelRatio(Math.min(devicePixelRatio, 2));
+      this.composer.setSize(this.container.clientWidth || 560, this.container.clientHeight || 560);
+    } else {
+      this.scene.background = null;
+    }
+    this._resize();
+  }
+
   _loop() {
     const dt = Math.min(0.05, this._clock.getDelta()) * (this.timeScale ?? 1);
     this.controls.update();
     this._anims = this._anims.filter(fn => fn(dt));
     this._updateFx(dt);
     for (const fn of this.onFrame) { try { fn(dt); } catch (e) { console.warn(e); } }
-    this.renderer.render(this.scene, this.camera);
+    if (this.quality === 'high' && this.composer) this.composer.render(dt); else this.renderer.render(this.scene, this.camera);
     requestAnimationFrame(() => this._loop());
   }
 
