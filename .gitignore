@@ -6,3 +6,5 @@ models/**/*.tga
 models/**/*.bmp
 models/**/*.txt
 models/*/
+
+node_modules/

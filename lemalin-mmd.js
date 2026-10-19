@@ -81,6 +81,8 @@ export class LemalinMMD {
     this.nextIdle = 3.5;
     this.mode = 'idle';  // idle | think | grab
     this.poseOff = { lean: 0, leanY: 0, armL: [0,0,0], armR: [0,0,0], elbL: 0, elbR: 0, wristL: 0, wristR: 0, hipL: 0, hipR: 0, headP: 0 };
+    this.smoothPose = structuredClone(this.poseOff);
+    this.mouthWeights = Object.fromEntries(['あ', 'い', 'う', 'え', 'お', 'ん'].map(n => [n, 0]));
     this.blobUrls = [];
     this._frame = dt => this.update(dt);
   }
@@ -241,37 +243,73 @@ export class LemalinMMD {
               #include <opaque_fragment>`);
         };
       }
+      // Shader source differs for face/body, even though the callback text is identical.
+      t.customProgramCacheKey = () => `lm-toon-v2-${isEye ? 'eye' : isFace ? 'face' : 'body'}`;
       m.dispose?.();
       return t;
     });
     mesh.material = mats;
     // 描线：反法线外壳
-    const lineMat = w => {
-      const lm = new THREE.MeshBasicMaterial({ color: 0x1a1430, side: THREE.BackSide, fog: true });
+    // Constant CSS-pixel silhouette width in both cameras. Extrude after skinning,
+    // not in model units (which made the portrait's outlines much too heavy).
+    const viewport = { value: new THREE.Vector2(1, 1) };
+    const pixelRatio = { value: 1 };
+    const lineMat = source => {
+      const w = source.userData.outline;
+      const lm = new THREE.MeshBasicMaterial({
+        color: 0x29233f, side: THREE.BackSide, fog: true,
+        // Respect cut-out hair/accessories instead of outlining their invisible polygons.
+        map: source.map, alphaTest: Math.max(source.alphaTest, 0.05),
+        opacity: source.opacity, transparent: source.transparent, depthWrite: false,
+      });
       lm.onBeforeCompile = sh => {
-        sh.uniforms.uW = this._outlineW || (this._outlineW = { value: 0.028 });
+        sh.uniforms.uOutlineViewport = viewport;
+        sh.uniforms.uOutlinePixelRatio = pixelRatio;
         sh.vertexShader = sh.vertexShader
-          .replace('#include <common>', '#include <common>\nuniform float uW;')
-          .replace('#include <begin_vertex>', `#include <begin_vertex>\n transformed += normalize(normal) * uW * ${w.toFixed(2)};`);
+          .replace('#include <common>', '#include <common>\nuniform vec2 uOutlineViewport;\nuniform float uOutlinePixelRatio;')
+          .replace('#include <project_vertex>', `#include <project_vertex>
+            vec2 lmNormal = (projectionMatrix * vec4(normalMatrix * objectNormal, 0.0)).xy * uOutlineViewport;
+            float lmLength = length(lmNormal);
+            if (lmLength > 0.0001) {
+              gl_Position.xy += (lmNormal / lmLength) * (2.0 * uOutlinePixelRatio / uOutlineViewport)
+                * gl_Position.w * ${(w * 0.85).toFixed(3)};
+            }`);
       };
-      lm.customProgramCacheKey = () => 'lmline' + w;
+      // Keep the alpha cut-out, not the source texture's color, on the shell.
+      lm.onBeforeCompile = ((compile) => sh => {
+        compile(sh);
+        sh.fragmentShader = sh.fragmentShader.replace('#include <map_fragment>', `
+          #ifdef USE_MAP
+            diffuseColor.a *= texture2D(map, vMapUv).a;
+          #endif`);
+      })(lm.onBeforeCompile);
+      lm.customProgramCacheKey = () => 'lm-pixel-outline-v2-' + w;
       return lm;
     };
     const hidden = new THREE.MeshBasicMaterial({ visible: false });
-    const cache = {};
-    const lineMats = mats.map(m => m.userData.outline ? (cache[m.userData.outline] ||= lineMat(m.userData.outline)) : hidden);
+    const lineMats = mats.map(m => m.userData.outline ? lineMat(m) : hidden);
     const outline = new THREE.SkinnedMesh(mesh.geometry, lineMats);
     outline.bind(mesh.skeleton, mesh.bindMatrix);
     outline.morphTargetInfluences = mesh.morphTargetInfluences;
     outline.morphTargetDictionary = mesh.morphTargetDictionary;
     outline.frustumCulled = false;
     outline.raycast = () => {};
+    outline.onBeforeRender = renderer => {
+      const target = renderer.getRenderTarget();
+      if (target) viewport.value.set(target.width, target.height);
+      else renderer.getDrawingBufferSize(viewport.value);
+      pixelRatio.value = renderer.getPixelRatio();
+    };
     outline.userData.isOutline = true;
     mesh.add(outline);
     this.outline = outline;
   }
   /** 画质：high/std 描线开，low 关 */
-  setQuality(q) { if (this.outline) this.outline.visible = q !== 'low'; }
+  setQuality(q) {
+    this.quality = q;
+    if (this.outline) this.outline.visible = q !== 'low';
+    if (this.avatar) this.avatar.renderer.setPixelRatio(q === 'low' ? 1 : Math.min(2, window.devicePixelRatio || 1));
+  }
 
   /* ---------------- 触摸分区（raycast） ---------------- */
   _region(hit) {
@@ -410,11 +448,30 @@ export class LemalinMMD {
     const l = this.anchor.worldToLocal(worldPt.clone());
     this.grab.side = l.x >= 0 ? '左' : '右';
     this.grab.active = true;
+    // Preserve the displayed gesture at IK takeover, then relax this baseline
+    // while reach weight rises. Do not filter the target: fingers must track the piece.
+    this.grab.entryTime = 0;
+    this.grab.entryYaw = this.bones['上半身']?.rotation.y || 0;
+    // Snapshot only the previous reach contribution. Breathing and the smoothed
+    // gesture continue independently, so their pitch must not be added twice.
+    const breath = Math.sin(this.t * 1.7);
+    this.grab.entryLean = (this.bones['上半身']?.rotation.x || 0)
+      - (this.baseLean + this.smoothPose.lean + breath * 0.012);
+    this.grab.entryLean2 = (this.bones['上半身2']?.rotation.x || 0) - breath * 0.01;
+    this.grab.entryPose = new Map([...this.rest.keys()].map(b => [b, b.quaternion.clone()]));
+    if (this.gest?.name === 'wink') this._setMorph('ウィンク', 0);
+    this.gest = null; // A superseded gesture must not reappear when the hand returns.
+    this.tiltTarget = this.mode === 'think' ? 0.14 : 0;
+    this.lookYawTarget = 0;
+    for (const key of Object.keys(this.poseOff)) {
+      if (Array.isArray(this.poseOff[key])) this.poseOff[key].fill(0);
+      else this.poseOff[key] = 0;
+    }
     this.grab.target.copy(worldPt);
   }
   /** 每帧：手（握点）目标（世界坐标）、IK 权重 0..1、手指合拢 0..1 */
   setGrab(worldPt, w, grip) { this.grab.target.copy(worldPt); this.grab.w = w; this.grab.grip = grip; }
-  endGrab() { const u = this.bones['上半身']; if (u) u.rotation.y = 0; this.lookYawTarget = 0; this.grab.active = false; this.grab.w = 0; this.grab.grip = 0; this.reachGap = 0; this._resetArms(); }
+  endGrab() { const u = this.bones['上半身']; if (u) u.rotation.y = 0; this.lookYawTarget = 0; this.grab.active = false; this.grab.w = 0; this.grab.grip = 0; this.reachGap = 0; this.grab.entryPose = null; this._resetArms(); }
 
   _rotToward(bone, joint, eff, target) {
     const v1 = eff.clone().sub(joint), v2 = target.clone().sub(joint);
@@ -428,6 +485,7 @@ export class LemalinMMD {
 
   _solveGrab() {
     const g = this.grab, w = g.w;
+    const entryWeight = Math.exp(-10 * (g.entryTime || 0));
     const side = g.side, sgn = side === '左' ? 1 : -1;
     const B = n => this.bones[side + n];
     const arm = B('腕'), elbow = B('ひじ'), wrist = B('手首'), mid = B('中指１');
@@ -438,8 +496,11 @@ export class LemalinMMD {
     const hd = Math.hypot(gl.x - sgn * 0.8, gl.z + 0.15);
     const lean = w * THREE.MathUtils.clamp((hd - 2.8) * 0.22, 0, 0.5);
     const yaw = w * THREE.MathUtils.clamp(Math.atan2(gl.x, Math.max(0.5, gl.z)) * 0.4, -0.4, 0.4);
-    if (up) { up.rotation.x += lean * 0.6; up.rotation.y = yaw; }
-    if (up2) up2.rotation.x += lean * 0.4;
+    if (up) {
+      up.rotation.x += lean * 0.6 + (g.entryLean || 0) * entryWeight * (1 - w);
+      up.rotation.y = yaw + (g.entryYaw || 0) * entryWeight * (1 - w);
+    }
+    if (up2) up2.rotation.x += lean * 0.4 + (g.entryLean2 || 0) * entryWeight * (1 - w);
     this.lookYawTarget = THREE.MathUtils.clamp(Math.atan2(gl.x, Math.max(0.5, gl.z)) * 0.5, -0.5, 0.5) * w;
     this._resetArms();
     this.mesh.updateMatrixWorld(true);
@@ -469,21 +530,28 @@ export class LemalinMMD {
     this._rotToward(elbow, E2, W2, Tr);
     const W3 = wrist.getWorldPosition(new THREE.Vector3()), M3 = mid.getWorldPosition(new THREE.Vector3());
     this._rotToward(wrist, W3, M3, W3.clone().add(handDir));
-    // 3) 与坐姿按权重混合
-    for (const bn of [arm, elbow, wrist]) {
-      const sol = bn.quaternion.clone();
-      bn.quaternion.copy(this.rest.get(bn)).slerp(sol, w);
+    // 3) Blend from the actual entry gesture, not a one-frame snap to seated rest.
+    const solved = [arm, elbow, wrist].map(bn => bn.quaternion.clone());
+    for (const [bn, rest] of this.rest) {
+      bn.quaternion.copy(rest);
+      const entry = g.entryPose?.get(bn);
+      if (entry) bn.quaternion.slerp(entry, entryWeight);
     }
+    [arm, elbow, wrist].forEach((bn, i) => bn.quaternion.slerp(solved[i], w));
     // 4) 手指合拢（伸手时微张）
     const grip = g.grip, open = (1 - grip) * w * 0.15;
+    const blendFinger = bone => {
+      const entry = g.entryPose?.get(bone);
+      if (entry) bone.quaternion.slerp(entry, entryWeight * (1 - w));
+    };
     for (const f of ['人指', '中指', '薬指', '小指']) {
       for (const [i, k] of [['１', 0.9], ['２', 1.15], ['３', 0.9]]) {
-        const fb = B(f + i); if (fb) fb.rotation.set(0, 0, -sgn * (grip * k - open));
+        const fb = B(f + i); if (fb) { fb.rotation.set(0, 0, -sgn * (grip * k - open)); blendFinger(fb); }
       }
     }
     const t1 = B('親指１'), t2 = B('親指２');
-    if (t1) t1.rotation.set(0, sgn * grip * 0.5, -sgn * grip * 0.25);
-    if (t2) t2.rotation.set(0, sgn * grip * 0.6, 0);
+    if (t1) { t1.rotation.set(0, sgn * grip * 0.5, -sgn * grip * 0.25); blendFinger(t1); }
+    if (t2) { t2.rotation.set(0, sgn * grip * 0.6, 0); blendFinger(t2); }
   }
 
   /** 世界坐标：她手的握点（中指根附近），用于调试/截图 */
@@ -501,16 +569,24 @@ export class LemalinMMD {
     r.setSize(canvas.clientWidth || 192, canvas.clientHeight || 192, false);
     r.outputColorSpace = main.outputColorSpace;
     r.toneMapping = main.toneMapping;
-    r.toneMappingExposure = main.toneMappingExposure * 1.08;
+    r.toneMappingExposure = main.toneMappingExposure; // Same colors in portrait and board.
     r.shadowMap.enabled = false;
     const cam = new THREE.PerspectiveCamera(24, 1, 6.2, 40);
     this.avatar = { renderer: r, camera: cam, canvas };
+    this.setQuality(this.quality || this.board.quality || 'std');
   }
   _renderAvatar() {
     const av = this.avatar;
     if (!av || !this.avatarOn || !this.visible) return;
     if ((this._avFrame++ & 1) === 1) return;   // 半帧率，省性能
     const head = this.bones['頭']; if (!head) return;
+    const width = av.canvas.clientWidth || 192, height = av.canvas.clientHeight || 192;
+    if (av.width !== width || av.height !== height) {
+      av.renderer.setSize(width, height, false);
+      av.camera.aspect = width / height;
+      av.camera.updateProjectionMatrix();
+      av.width = width; av.height = height;
+    }
     const scene = this.board.scene;
     const actorVis = this.board.actorRoot.visible;
     this.board.actorRoot.visible = true;          // 交战特写时主画面隐藏她，头像照常
@@ -578,6 +654,7 @@ export class LemalinMMD {
     this.talk.active = false;
     this.talk.open = 0;
     this.talk.cur = '';
+    for (const n in this.mouthWeights) this.mouthWeights[n] = 0;
     for (const n of ['あ', 'い', 'う', 'え', 'お', 'ん', 'あ２', '□', 'ワ']) this._setMorph(n, 0);
   }
 
@@ -597,8 +674,9 @@ export class LemalinMMD {
     }
     const audioFresh = performance.now() - this.audioMouth.ts < 150;
     let vis = null, open = 0;
-    if (audioFresh && this.audioMouth.amp > 0.02) {
-      open = this.audioMouth.amp;
+    if (audioFresh) {
+      // Fresh silent audio is a pause, not permission to fall back to text.
+      open = this.audioMouth.amp > 0.02 ? this.audioMouth.amp : 0;
       vis = this.audioMouth.viseme || 'あ';
     } else if (this.talk.active) {
       this.talk.t += dt;
@@ -608,11 +686,18 @@ export class LemalinMMD {
       vis = k.v; open = k.open;
       // 音节内微抖，更像说话
       if (open > 0.05) open *= 0.82 + 0.18 * Math.sin(this.talk.t * 28);
-      if (this.talk.t >= this.talk.dur) this.stopSpeak();
+      if (this.talk.t >= this.talk.dur) { this.talk.active = false; vis = null; open = 0; }
     }
     this.talk.cur = vis || '';
     this.talk.open = open;
-    if (vis && open > 0.02) this._setMorph(vis === 'ん' ? 'ん' : vis, open);
+    // Coarticulation: fade the previous vowel out while the next opens.
+    // Exponential smoothing is stable at 30/60/120 Hz, without extra bones or physics.
+    for (const n in this.mouthWeights) {
+      const target = n === vis ? open : 0;
+      const rate = target > this.mouthWeights[n] ? 24 : 18;
+      this.mouthWeights[n] += (target - this.mouthWeights[n]) * -Math.expm1(-rate * dt);
+      this._setMorph(n, this.mouthWeights[n] < 0.001 ? 0 : this.mouthWeights[n]);
+    }
   }
 
   /* ==================== 手势 / 表情 ==================== */
@@ -825,8 +910,18 @@ export class LemalinMMD {
     }
   }
 
+  _smoothPoseOff(dt) {
+    const alpha = -Math.expm1(-14 * dt);
+    for (const key of Object.keys(this.poseOff)) {
+      const target = this.poseOff[key];
+      if (Array.isArray(target)) {
+        for (let i = 0; i < target.length; i++) this.smoothPose[key][i] += (target[i] - this.smoothPose[key][i]) * alpha;
+      } else this.smoothPose[key] += (target - this.smoothPose[key]) * alpha;
+    }
+  }
+
   _applyPoseOff() {
-    const o = this.poseOff;
+    const o = this.smoothPose;
     const up = this.bones['上半身'];
     if (up) { up.rotation.y = o.leanY; }  // lean.x 在呼吸段统一：baseLean + poseOff.lean + br
     const add = (name, dx, dy, dz) => {
@@ -844,6 +939,7 @@ export class LemalinMMD {
 
   update(dt) {
     if (!this.mesh || !this.anchor.visible) return;
+    dt = Math.min(0.05, Math.max(0, Number.isFinite(dt) ? dt : 0));
     this.t += dt;
     // —— 空闲手势调度 ——
     if (!this.grab.active && !this.gest) {
@@ -872,6 +968,8 @@ export class LemalinMMD {
       }
     }
 
+    this._smoothPoseOff(dt);
+
     // 身体手势：恢复坐姿 rest → 叠加 poseOff（拿子时手臂交给 IK）
     if (!this.grab.active) {
       this._resetArms();
@@ -887,16 +985,16 @@ export class LemalinMMD {
     // 呼吸叠在手势之上
     const br = Math.sin(this.t * 1.7);
     const up = this.bones['上半身'], up2 = this.bones['上半身2'];
-    if (up) up.rotation.x = this.baseLean + this.poseOff.lean + br * 0.012;
+    if (up) up.rotation.x = this.baseLean + this.smoothPose.lean + br * 0.012;
     if (up2) up2.rotation.x = br * 0.01;
     const sh = [this.bones['左肩'], this.bones['右肩']];
     sh.forEach((b, i) => { if (b) b.rotation.z += (i ? -1 : 1) * br * 0.012; });
 
     // 头
-    this.tilt += (this.tiltTarget - this.tilt) * Math.min(1, dt * 4);
-    this.lookYaw += (this.lookYawTarget - this.lookYaw) * Math.min(1, dt * 3);
+    this.tilt += (this.tiltTarget - this.tilt) * -Math.expm1(-dt * 4);
+    this.lookYaw += (this.lookYawTarget - this.lookYaw) * -Math.expm1(-dt * 3);
     const head = this.bones['頭'], neck = this.bones['首'];
-    const hp = this.poseOff.headP;
+    const hp = this.smoothPose.headP;
     if (head) head.rotation.set(0.03 + Math.sin(this.t * 0.6) * 0.02 + hp, this.lookYaw, this.tilt);
     if (neck) neck.rotation.set(0.05 + hp * 0.4, this.lookYaw * 0.4, this.tilt * 0.3);
 
@@ -921,7 +1019,7 @@ export class LemalinMMD {
     }
 
     this._updateMouth(dt);
-    if (this.grab.active) this._solveGrab();
+    if (this.grab.active) { this.grab.entryTime = (this.grab.entryTime || 0) + dt; this._solveGrab(); }
     this._applyBoneMorphs();
     this._renderAvatar();
   }
