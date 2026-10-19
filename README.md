@@ -56,3 +56,27 @@ python3 -m http.server 8765
 ## 许可说明
 
 引擎 Stockfish 16 为 GPLv3；规则库 chess.js；美术与对战 UI 为同人练习作品。
+
+## 对面就座的恶毒（加密 MMD 模型 · 仅私人使用）
+
+- 左侧勾选「显示恶毒」，输入模型密码后点「载入」。浏览器用 WebCrypto 在本地解密 `models/lemalin.enc`，模型只以内存 blob URL 交给 three.js MMDLoader，不落盘。
+- 恶毒坐在引擎执子那一方的棋盘后面，面向指挥官；有呼吸、眨眼、思考歪头，吃子、被吃、将军、终局时有表情反应。吃子交战特写期间会暂时隐身，免得挡镜头。
+- 密码错误、没有模型包或浏览器不支持解密时，会提示并回退到 Q 版秘书，不影响下棋。WebCrypto 需要 https 或 localhost。
+- 仓库里**只有加密包**，没有明文 pmx 或贴图（`.gitignore` 已屏蔽）。重新生成：
+
+```bash
+CHESS_MODEL_PASSWORD='…' MODEL_SRC=/path/to/碧蓝航线_恶毒 python3 tools/build_model.py
+```
+
+加密参数：PBKDF2-HMAC-SHA256，250000 次迭代，16 字节随机盐；AES-256-GCM。贴图降到 1024 像素，只打包主模型用到的 3 张。
+
+### 借物表
+
+- 模型：碧蓝航线_恶毒（Azur Lane Le Malin）
+- 模型作者：**碧蓝航线CrossWave / Ricetans90° / 洛城提熙**
+  - 模型版权归属：碧蓝航线CrossWave
+  - 提取：Ricetans90°
+  - 绑骨：Ricetans90° / 洛城提熙
+  - 物理 / 表情 / 模型编辑：洛城提熙
+- 配布：洛城提熙（B 站 BV19r4y1T744，https://space.bilibili.com/4963039）
+- 本项目仅供私人使用。模型已加密，不公开配布，不作商用。请遵守原 readme 使用规约。

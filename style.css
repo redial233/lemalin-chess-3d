@@ -73,3 +73,8 @@ canvas.px{image-rendering:pixelated;image-rendering:crisp-edges}
  .panel{width:min(96vw,360px)}
  #boardBox{width:min(96vw,560px)}
 }
+
+.lmpw{display:flex;gap:6px;margin:4px 0}
+.lmpw input{flex:1;min-width:0;background:#0b1126;color:var(--silver);border:1px solid #8fe3ff44;border-radius:8px;padding:5px}
+#lmStatus{font-size:12px;color:var(--dim);min-height:16px;margin:2px 0 6px}
+#lmStatus.ok{color:#9ff0c8}#lmStatus.err{color:#ff9db0}

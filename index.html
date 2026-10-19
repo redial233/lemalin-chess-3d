@@ -30,6 +30,12 @@
   <label class="chk"><input id="liveFb" type="checkbox" checked>实时评价我的每一步</label>
   <label class="chk"><input id="snd" type="checkbox" checked>音效</label>
   <label class="chk"><input id="cineCap" type="checkbox" checked>吃子交战特写（魔法石棋局风）</label>
+  <label class="chk"><input id="showLm" type="checkbox">显示恶毒（对面就座 · 3D 模型）</label>
+  <div id="lmRow" hidden>
+   <div class="lmpw"><input id="lmPw" type="password" placeholder="模型密码" autocomplete="off"><button id="lmLoad">载入</button></div>
+   <label class="chk"><input id="lmRemember" type="checkbox">在本机记住密码</label>
+  </div>
+  <div id="lmStatus"></div>
   <label>画风<select id="artStyle"><option value="pixel">像素风（默认）</option><option value="vector">矢量 Q 版</option></select></label>
   <button id="newGame" class="primary">✦ 开始新对局</button>
   <div class="btnrow"><button id="hint">💡 提示</button><button id="undo">↶ 悔棋</button></div>
@@ -69,6 +75,7 @@
 <div id="pgnModal" hidden><div class="box"><h2>📜 PGN 导入 / 导出</h2>
  <textarea id="pgnText" placeholder="把 PGN 粘贴到这里，点「导入并复盘」"></textarea>
  <div class="btnrow"><button id="pgnCopy">复制当前棋谱</button><button id="pgnDl">下载 .pgn</button><button id="pgnLoad">导入并复盘</button><button id="pgnClose">关闭</button></div></div></div>
-<footer>3D · Three.js · 引擎 Stockfish 16（GPLv3）· 规则 chess.js · 基于恶毒的月夜棋盘 · 仅为同人练习作品</footer>
+<footer>3D · Three.js · 引擎 Stockfish 16（GPLv3）· 规则 chess.js · 基于恶毒的月夜棋盘 · 仅为同人练习作品<br>
+ 借物表 · 3D 模型「碧蓝航线_恶毒」：模型作者 碧蓝航线CrossWave / Ricetans90° / 洛城提熙（模型版权归属：碧蓝航线CrossWave；提取：Ricetans90°；绑骨：Ricetans90°/洛城提熙；物理/表情/编辑：洛城提熙）· 仅私人使用，模型已加密、不公开配布</footer>
 <script type="module" src="app.js"></script>
 </body></html>

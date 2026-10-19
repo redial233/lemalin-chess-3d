@@ -1,0 +1,8 @@
+# 明文模型绝不入库，只允许加密包 models/lemalin.enc
+*.pmx
+*.pmd
+models/**/*.png
+models/**/*.tga
+models/**/*.bmp
+models/**/*.txt
+models/*/

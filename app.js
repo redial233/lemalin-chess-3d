@@ -2,6 +2,7 @@ import { Chess } from './vendor/chess.js';
 import { chibiSVG, backgroundSVG } from './chibi.js';
 import { lemalin, blinkFrame, drawGrid, drawBackground } from './pixel.js';
 import { Board3D } from './board3d.js';
+import { LemalinMMD } from './lemalin-mmd.js';
 
 const $ = s => document.querySelector(s);
 
@@ -278,6 +279,11 @@ async function afterMove(mv, byMe, fenBefore) {
   sel = null;
   renderUI();
   moveBusy = false;
+  if (lm && lm.loaded) {
+    lm.lookAtSquare(board3d._sqToXZ(mv.to)[0], board3d._sqToXZ(mv.to)[1]);
+    if (game.inCheck()) lm.react('check');
+    else if (mv.captured) lm.react(byMe ? 'captured' : 'capture');
+  }
 
   const my = token;
   if (game.isGameOver()) return end();
@@ -310,8 +316,10 @@ async function engineMove(my) {
   const lvl = +$('#lvl').value, useElo = $('#useElo').checked;
   const mt = 150 + lvl * 60;
   say(pick(L.think), 'yawn');
+  lm?.react('think');
   await new Promise(r => setTimeout(r, 250));
   const r = await player.analyze(game.fen(), { movetime: mt, skill: lvl, elo: useElo ? +$('#elo').value : null });
+  lm?.react('idle');
   if (my !== token || !running) return;
   const fenBefore = game.fen();
   const mv = game.move({ from: r.best.slice(0, 2), to: r.best.slice(2, 4), promotion: r.best[4] });
@@ -340,6 +348,7 @@ function end(res, why) {
     }
   }
   say(pick(L[res]), res === 'win' ? 'happy' : res === 'lose' ? 'sleepy' : 'smug');
+  lm?.react(res === 'win' ? 'lose' : res === 'lose' ? 'win' : 'idle');
   beep(res === 'win' ? 780 : 260, .2);
   renderClocks();
   setTimeout(() => summary(res, why), 1500);
@@ -368,6 +377,7 @@ $('#newGame').onclick = () => {
   me = sv === 'r' ? (Math.random() < .5 ? 'w' : 'b') : sv;
   flipped = me === 'b';
   board3d.setFlipped(flipped);
+  board3d.setEngineColor(me === 'w' ? 'b' : 'w');
   let tc = $('#tc').value;
   if (tc === 'custom') tc = $('#cMin').value + '+' + $('#cInc').value;
   timed = tc !== 'none';
@@ -582,6 +592,7 @@ $('#pgnLoad').onclick = () => {
   me = hdr.Black && /指挥官/.test(hdr.Black) ? 'b' : 'w';
   flipped = me === 'b';
   board3d.setFlipped(flipped);
+  board3d.setEngineColor(me === 'w' ? 'b' : 'w');
   meta = game.history().map((s, i) => ({ san: s, q: null, by: (i % 2 === 0) === (me === 'w') }));
   evals = [0];
   $('#pgnModal').hidden = true;
@@ -591,3 +602,49 @@ $('#pgnLoad').onclick = () => {
 $('#pgnClose').onclick = () => $('#pgnModal').hidden = true;
 
 window.__dbg3d = { game: () => game, board3d, meta: () => meta };
+
+/* ---------- 对面就座的恶毒（加密 MMD 模型，仅私人使用） ---------- */
+let lm = null, lmLoading = false;
+const lmStatus = (t, cls = '') => { const el = $('#lmStatus'); el.textContent = t; el.className = cls; };
+async function loadLemalin(pw) {
+  if (lmLoading) return;
+  if (lm && lm.loaded) { lm.setVisible(true); return; }
+  if (!pw) { $('#lmRow').hidden = false; lmStatus('输入模型密码后点「载入」'); return; }
+  lmLoading = true; lmStatus('解密并载入模型中……');
+  const inst = new LemalinMMD(board3d);
+  try {
+    await inst.load(pw);
+    lm = inst;
+    if (localStorage.lm3dRemember === '1') localStorage.lm3dPw = pw; else delete localStorage.lm3dPw;
+    $('#lmPw').value = '';
+    $('#lmRow').hidden = true;
+    lmStatus('恶毒已在对面就座 🌙', 'ok');
+    lm.setVisible($('#showLm').checked);
+    say('哈啊……我坐到对面来了哦，指挥官，好好下吧~', 'happy');
+  } catch (e) {
+    inst.dispose();
+    const msg = e.message === 'BAD_PASSWORD' ? '密码不对哦……已回退到 Q 版秘书'
+      : e.message === 'NO_MODEL_FILE' ? '没找到模型包（models/lemalin.enc），已回退到 Q 版'
+      : e.message === 'NO_WEBCRYPTO' ? '浏览器不支持解密（需 https 或 localhost），已回退到 Q 版'
+      : '模型载入失败，已回退到 Q 版秘书';
+    console.warn('[lemalin-mmd]', e);
+    if (e.message === 'BAD_PASSWORD') delete localStorage.lm3dPw;
+    $('#lmRow').hidden = false;
+    lmStatus(msg, 'err');
+  } finally { lmLoading = false; }
+}
+$('#lmRemember').checked = localStorage.lm3dRemember === '1';
+$('#lmRemember').onchange = () => {
+  localStorage.lm3dRemember = $('#lmRemember').checked ? '1' : '0';
+  if (!$('#lmRemember').checked) delete localStorage.lm3dPw;
+};
+$('#showLm').onchange = () => {
+  const on = $('#showLm').checked;
+  localStorage.lm3dShow = on ? '1' : '0';
+  if (on) loadLemalin(localStorage.lm3dPw || '');
+  else { lm?.setVisible(false); $('#lmRow').hidden = true; lmStatus(''); }
+};
+$('#lmLoad').onclick = () => loadLemalin($('#lmPw').value);
+$('#lmPw').addEventListener('keydown', e => { if (e.key === 'Enter') loadLemalin($('#lmPw').value); });
+if (localStorage.lm3dShow === '1') { $('#showLm').checked = true; loadLemalin(localStorage.lm3dPw || ''); }
+window.__dbg3d.lm = () => lm;

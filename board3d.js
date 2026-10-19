@@ -153,7 +153,7 @@ export class Board3D {
     const w = container.clientWidth || 560;
     const h = container.clientHeight || 560;
     this.camera = new THREE.PerspectiveCamera(42, w / h, 0.1, 100);
-    this.camera.position.set(0, 9.5, 10.5);
+    this.camera.position.set(0, 9.2, 11.6);
 
     this.renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
     this.renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
@@ -171,7 +171,7 @@ export class Board3D {
     this.controls.minDistance = 6;
     this.controls.maxDistance = 22;
     this.controls.maxPolarAngle = Math.PI * 0.48;
-    this.controls.target.set(0, 0, 0);
+    this.controls.target.set(0, 0.9, -1.4);
     this.controls.mouseButtons = {
       LEFT: -1,
       MIDDLE: THREE.MOUSE.DOLLY,
@@ -195,6 +195,10 @@ export class Board3D {
     this.scene.add(this.markerRoot);
     this.arrowRoot = new THREE.Group();
     this.scene.add(this.arrowRoot);
+    this.actorRoot = new THREE.Group(); // 对面坐着的恶毒（MMD）
+    this.scene.add(this.actorRoot);
+    this.onFrame = [];
+    this.engineColor = 'b';
     this.trailRoot = new THREE.Group();
     this.scene.add(this.trailRoot);
 
@@ -458,12 +462,20 @@ export class Board3D {
     this.arrowRoot.rotation.y = rot;
     this.trailRoot.rotation.y = rot;
     this.fxRoot.rotation.y = rot;
-    const dist = this.camera.position.length();
-    const elev = Math.max(6, this.camera.position.y);
-    const zSign = flipped ? -1 : 1;
-    this.camera.position.set(0, elev, zSign * Math.sqrt(Math.max(1, dist * dist - elev * elev)));
-    this.controls.target.set(0, 0, 0);
+    this.actorRoot.rotation.y = rot;
     this.controls.update();
+  }
+
+  /** 引擎执哪一方：恶毒坐在那一方棋盘后面（棋盘本地坐标，随翻转一起转） */
+  setEngineColor(c) {
+    this.engineColor = c;
+    // 黑方在本地 -z（8 线一侧），白方在 +z
+    this.actorRoot.children.forEach(ch => {
+      if (ch.userData.seatAnchor) {
+        ch.position.z = c === 'b' ? -ch.userData.seatDist : ch.userData.seatDist;
+        ch.rotation.y = c === 'b' ? 0 : Math.PI;
+      }
+    });
   }
 
   syncPosition(board, { animateFrom } = {}) {
@@ -536,6 +548,7 @@ export class Board3D {
     this.animating = false;
     this.inputLocked = false;
     this.controls.enabled = true;
+    if (this._actorWasVisible !== undefined) { this.actorRoot.visible = this._actorWasVisible; this._actorWasVisible = undefined; }
     this.syncPosition(boardAfter);
     if (this._pendingSync) {
       const b = this._pendingSync;
@@ -624,6 +637,8 @@ export class Board3D {
       this.animating = true;
       this.inputLocked = true;
       this.controls.enabled = false;
+      this._actorWasVisible = this.actorRoot.visible;
+      this.actorRoot.visible = false;
       this.sel = null;
       this._updateMarkers();
 
@@ -669,6 +684,10 @@ export class Board3D {
         .add(new THREE.Vector3(0, 1.55, 0))
         .addScaledVector(dir, -0.55);
       const heroTarget = mid.clone().add(new THREE.Vector3(0, 0.45, 0));
+      // 棋子坐标是棋盘本地坐标；翻转时要换算成世界坐标再给镜头
+      this.pieceRoot.updateMatrixWorld();
+      this.pieceRoot.localToWorld(heroCam);
+      this.pieceRoot.localToWorld(heroTarget);
 
       // 时间轴（秒）
       const T_PUSH = 0.32;
@@ -694,7 +713,7 @@ export class Board3D {
         this._combatFlash = new THREE.PointLight(0xffe0a0, 0, 8);
         this.scene.add(this._combatFlash);
       }
-      this._combatFlash.position.copy(mid).setY(1.0);
+      this._combatFlash.position.copy(this.pieceRoot.localToWorld(mid.clone().setY(1.0)));
       this._combatFlash.intensity = 0;
 
       const tick = (dt) => {
@@ -1357,6 +1376,7 @@ export class Board3D {
     this.controls.update();
     this._anims = this._anims.filter(fn => fn(dt));
     this._updateFx(dt);
+    for (const fn of this.onFrame) { try { fn(dt); } catch (e) { console.warn(e); } }
     this.renderer.render(this.scene, this.camera);
     requestAnimationFrame(() => this._loop());
   }
