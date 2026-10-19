@@ -162,7 +162,7 @@ export class Board3D {
     this.renderer.shadowMap.enabled = true;
     this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    this.renderer.toneMappingExposure = 1.05;
+    this.renderer.toneMappingExposure = 0.95;
     container.appendChild(this.renderer.domElement);
 
     this.controls = new OrbitControls(this.camera, this.renderer.domElement);
@@ -231,9 +231,10 @@ export class Board3D {
   }
 
   _buildLights() {
-    this.scene.add(new THREE.AmbientLight(0xb0bce8, 0.42));
-    const moon = new THREE.DirectionalLight(0xd8e8ff, 1.25);
-    moon.position.set(-7, 15, 5);
+    // 压暗环境光，用主光塑造明暗，让棋子高光立在略暗的盘面上
+    this.scene.add(new THREE.AmbientLight(0x8a96b8, 0.22));
+    const moon = new THREE.DirectionalLight(0xf0f4ff, 1.55);
+    moon.position.set(-6, 16, 6);
     moon.castShadow = true;
     moon.shadow.mapSize.set(1024, 1024);
     moon.shadow.camera.near = 1;
@@ -242,13 +243,18 @@ export class Board3D {
     moon.shadow.camera.right = 10;
     moon.shadow.camera.top = 10;
     moon.shadow.camera.bottom = -10;
+    moon.shadow.bias = -0.0008;
     this.scene.add(moon);
-    const fillLight = new THREE.DirectionalLight(0xb49cff, 0.4);
-    fillLight.position.set(8, 6, -5);
+    const fillLight = new THREE.DirectionalLight(0xa8b8e0, 0.28);
+    fillLight.position.set(9, 5, -4);
     this.scene.add(fillLight);
-    const rim = new THREE.PointLight(0x8fe3ff, 0.55, 28);
-    rim.position.set(0, 5, 9);
+    // 边缘勾边光：从侧后方轻轻照亮轮廓
+    const rim = new THREE.DirectionalLight(0xcfe8ff, 0.45);
+    rim.position.set(2, 4, 10);
     this.scene.add(rim);
+    const cool = new THREE.PointLight(0x6a90c8, 0.25, 22);
+    cool.position.set(0, 3.5, 8);
+    this.scene.add(cool);
     this._checkLight = new THREE.PointLight(0xff6688, 0, 6);
     this.scene.add(this._checkLight);
   }
@@ -321,7 +327,7 @@ export class Board3D {
 
     // 多层底座
     const baseMat = new THREE.MeshStandardMaterial({
-      color: 0x141a38, roughness: 0.5, metalness: 0.25,
+      color: 0x0c1024, roughness: 0.55, metalness: 0.22,
     });
     const base = new THREE.Mesh(new THREE.BoxGeometry(9.0, 0.38, 9.0), baseMat);
     base.position.y = -0.22;
@@ -382,15 +388,14 @@ export class Board3D {
     }
 
     this.squares = {};
-    const lightMat = new THREE.MeshPhysicalMaterial({
-      color: 0xd8dff0, roughness: 0.45, metalness: 0.15,
-      clearcoat: 0.35, clearcoatRoughness: 0.4,
-      emissive: 0x8890b0, emissiveIntensity: 0.03,
+    // 浅格：月光银灰（明显提亮）；深格：深蓝黑（明显压暗）
+    const lightMat = new THREE.MeshStandardMaterial({
+      color: 0xe8eef8, roughness: 0.62, metalness: 0.06,
+      emissive: 0x000000, emissiveIntensity: 0,
     });
-    const darkMat = new THREE.MeshPhysicalMaterial({
-      color: 0x343c62, roughness: 0.55, metalness: 0.2,
-      clearcoat: 0.25, clearcoatRoughness: 0.5,
-      emissive: 0x1a2040, emissiveIntensity: 0.05,
+    const darkMat = new THREE.MeshStandardMaterial({
+      color: 0x1a1f36, roughness: 0.78, metalness: 0.12,
+      emissive: 0x0a0e1c, emissiveIntensity: 0.04,
     });
     for (let r = 0; r < 8; r++) {
       for (let f = 0; f < 8; f++) {
@@ -872,17 +877,17 @@ export class Board3D {
     };
 
     if (this.lastMove) {
-      addGlow(this.lastMove.from, 0xb49cff, 0.28);
-      addGlow(this.lastMove.to, 0xb49cff, 0.38);
+      addGlow(this.lastMove.from, 0x9a80e0, 0.18);
+      addGlow(this.lastMove.to, 0x9a80e0, 0.22);
     }
 
     // 选中：脚下双环 + 上升粒子
     if (this.sel) {
       const [x, z] = this._sqToXZ(this.sel);
-      addGlow(this.sel, 0x8fe3ff, 0.4, 0.11);
+      addGlow(this.sel, 0x6ec8e8, 0.22, 0.11);
       const ring = new THREE.Mesh(
         new THREE.TorusGeometry(0.38, 0.035, 8, 40),
-        new THREE.MeshBasicMaterial({ color: 0xcfe8ff, transparent: true, opacity: 0.85, depthWrite: false })
+        new THREE.MeshBasicMaterial({ color: 0xa8e0f0, transparent: true, opacity: 0.7, depthWrite: false })
       );
       ring.rotation.x = -Math.PI / 2;
       ring.position.set(x, 0.14, z);
@@ -891,7 +896,7 @@ export class Board3D {
       this.markerRoot.add(ring);
       const ring2 = new THREE.Mesh(
         new THREE.TorusGeometry(0.48, 0.018, 6, 40),
-        new THREE.MeshBasicMaterial({ color: 0xb49cff, transparent: true, opacity: 0.55, depthWrite: false })
+        new THREE.MeshBasicMaterial({ color: 0x9880d0, transparent: true, opacity: 0.4, depthWrite: false })
       );
       ring2.rotation.x = -Math.PI / 2;
       ring2.position.set(x, 0.13, z);
@@ -929,7 +934,7 @@ export class Board3D {
         const disc = new THREE.Mesh(
           new THREE.RingGeometry(0.22, 0.4, 40),
           new THREE.MeshBasicMaterial({
-            color: 0xff7aa0, transparent: true, opacity: 0.7,
+            color: 0xe06088, transparent: true, opacity: 0.55,
             side: THREE.DoubleSide, depthWrite: false,
           })
         );
@@ -940,7 +945,7 @@ export class Board3D {
         const inner = new THREE.Mesh(
           new THREE.CircleGeometry(0.12, 24),
           new THREE.MeshBasicMaterial({
-            color: 0xffb0c8, transparent: true, opacity: 0.45,
+            color: 0xe090a8, transparent: true, opacity: 0.3,
             side: THREE.DoubleSide, depthWrite: false,
           })
         );
@@ -952,7 +957,7 @@ export class Board3D {
         const glow = new THREE.Mesh(
           new THREE.CircleGeometry(0.22, 28),
           new THREE.MeshBasicMaterial({
-            color: 0x7c5cff, transparent: true, opacity: 0.55,
+            color: 0x6a50d0, transparent: true, opacity: 0.4,
             side: THREE.DoubleSide, depthWrite: false,
           })
         );
@@ -1006,38 +1011,40 @@ export class Board3D {
 
   /* ========== 华丽棋子 ========== */
   _mats(isWhite) {
+    // 白：象牙白/珍珠白，紫光只作点缀；黑：炭黑墨蓝，青光集中在冠饰
     const body = new THREE.MeshPhysicalMaterial({
-      color: isWhite ? 0xf4f6ff : 0x1e2438,
-      metalness: isWhite ? 0.55 : 0.65,
-      roughness: isWhite ? 0.28 : 0.32,
-      clearcoat: 0.45,
-      clearcoatRoughness: 0.25,
-      emissive: isWhite ? 0xb0a0e0 : 0x204060,
-      emissiveIntensity: isWhite ? 0.08 : 0.12,
+      color: isWhite ? 0xfff8f0 : 0x0c0e16,
+      metalness: isWhite ? 0.28 : 0.45,
+      roughness: isWhite ? 0.38 : 0.42,
+      clearcoat: isWhite ? 0.55 : 0.3,
+      clearcoatRoughness: 0.35,
+      emissive: isWhite ? 0xfff0e8 : 0x000000,
+      emissiveIntensity: isWhite ? 0.04 : 0,
     });
     const accent = new THREE.MeshPhysicalMaterial({
-      color: isWhite ? 0xc8b6ff : 0x6ec8e8,
-      metalness: 0.7,
-      roughness: 0.22,
-      emissive: isWhite ? 0x8a6cff : 0x3ab0d0,
-      emissiveIntensity: 0.35,
-      clearcoat: 0.5,
+      color: isWhite ? 0xb8a0e8 : 0x4ab8d8,
+      metalness: 0.65,
+      roughness: 0.28,
+      emissive: isWhite ? 0x7a5cc8 : 0x2a90b0,
+      emissiveIntensity: isWhite ? 0.22 : 0.28,
+      clearcoat: 0.4,
     });
     const gem = new THREE.MeshPhysicalMaterial({
-      color: isWhite ? 0xe8d0ff : 0xa0f0ff,
-      metalness: 0.4,
-      roughness: 0.15,
-      emissive: isWhite ? 0xb49cff : 0x8fe3ff,
-      emissiveIntensity: 0.55,
+      color: isWhite ? 0xe0d0ff : 0x80e8ff,
+      metalness: 0.35,
+      roughness: 0.18,
+      emissive: isWhite ? 0xa080e0 : 0x60d0f0,
+      emissiveIntensity: isWhite ? 0.4 : 0.45,
       transparent: true,
-      opacity: 0.92,
+      opacity: 0.95,
     });
+    // 描边感腰环：白子略深灰紫，黑子略浅青灰，与盘面分离
     const rim = new THREE.MeshStandardMaterial({
-      color: isWhite ? 0xd8dff0 : 0x2a3558,
-      metalness: 0.75,
-      roughness: 0.25,
-      emissive: isWhite ? 0x8890c0 : 0x1a4060,
-      emissiveIntensity: 0.15,
+      color: isWhite ? 0x6a6580 : 0x3a5068,
+      metalness: 0.55,
+      roughness: 0.4,
+      emissive: isWhite ? 0x2a2840 : 0x102030,
+      emissiveIntensity: 0.08,
     });
     return { body, accent, gem, rim };
   }
@@ -1050,6 +1057,28 @@ export class Board3D {
     m.scale.set(sx, sy, sz);
     g.add(m);
     return m;
+  }
+
+  /** 轻量背面挤出描边，斜视时轮廓更清晰 */
+  _addSilhouette(g, isWhite) {
+    const mat = new THREE.MeshBasicMaterial({
+      color: isWhite ? 0x2a2438 : 0x000000,
+      side: THREE.BackSide,
+      depthWrite: false,
+    });
+    const outs = [];
+    g.traverse(child => {
+      if (!child.isMesh || !child.geometry || child.userData.isOutline) return;
+      const o = new THREE.Mesh(child.geometry, mat);
+      o.userData.isOutline = true;
+      o.position.copy(child.position);
+      o.rotation.copy(child.rotation);
+      o.scale.copy(child.scale).multiplyScalar(1.07);
+      o.castShadow = false;
+      o.receiveShadow = false;
+      outs.push([child.parent || g, o]);
+    });
+    for (const [parent, o] of outs) parent.add(o);
   }
 
   /** 华丽分层基座（所有棋子共用） */
@@ -1206,22 +1235,24 @@ export class Board3D {
         break;
       }
     }
+    this._addSilhouette(g, isWhite);
     return g;
   }
 
   _disposeMesh(obj) {
+    const seenGeo = new Set();
+    const seenMat = new Set();
     obj.traverse?.(child => {
-      if (child.geometry) child.geometry.dispose();
-      if (child.material) {
-        if (Array.isArray(child.material)) child.material.forEach(m => m.dispose());
-        else child.material.dispose();
+      // 描边共用 geometry，只 dispose 一次
+      if (child.geometry && !seenGeo.has(child.geometry)) {
+        seenGeo.add(child.geometry);
+        child.geometry.dispose();
+      }
+      const mats = child.material ? (Array.isArray(child.material) ? child.material : [child.material]) : [];
+      for (const m of mats) {
+        if (m && !seenMat.has(m)) { seenMat.add(m); m.dispose(); }
       }
     });
-    if (obj.geometry) obj.geometry.dispose();
-    if (obj.material) {
-      if (Array.isArray(obj.material)) obj.material.forEach(m => m.dispose());
-      else obj.material.dispose();
-    }
   }
 
   _onPointerDown(e) {
