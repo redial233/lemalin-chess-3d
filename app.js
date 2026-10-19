@@ -53,7 +53,7 @@ const analyzer = new Engine(), player = new Engine();
 let BOOK = [];
 fetch('openings.json').then(r => r.json()).then(j => {
   BOOK = j.map(([eco, fam, v, line]) => ({ eco, fam, v, name: fam + (v ? '·' + v : ''), moves: line ? line.split(' ') : [] }));
-  renderUI();
+  if (typeof board3d !== 'undefined') renderUI();
 });
 
 /* ---------- 恶毒台词 ---------- */
@@ -135,6 +135,10 @@ const PROMO_GLYPH = { q: '♕', r: '♖', b: '♗', n: '♘', Q: '♛', R: '♜'
 const board3d = new Board3D($('#board3d'), {
   onSquareClick: sq => onSquareClick(sq)
 });
+function syncCineOpt(){ board3d.cinematicCaptures = $('#cineCap').checked; }
+syncCineOpt();
+$('#cineCap').onchange = () => { syncCineOpt(); localStorage.lm3dCine = $('#cineCap').checked ? '1' : '0'; };
+if (localStorage.lm3dCine === '0') { $('#cineCap').checked = false; syncCineOpt(); }
 
 function syncBoard3d(g = disp()) {
   board3d.syncPosition(g.board());
@@ -213,7 +217,7 @@ function renderEval() {
 
 /* ---------- 交互 ---------- */
 function onSquareClick(s) {
-  if (view !== null || !running || game.turn() !== me || moveBusy) return;
+  if (view !== null || !running || game.turn() !== me || moveBusy || board3d.inputLocked) return;
   const p = game.get(s);
   if (sel) {
     const mv = game.moves({ square: sel, verbose: true }).filter(m => m.to === s);
