@@ -117,6 +117,7 @@ let view = null;
 let rv = null;
 let startFen = new Chess().fen();
 let moveBusy = false;
+let animMover = null;   // 动画期间：恶毒拿子算她自己的时间；玩家自己的走子动画不计时
 
 function disp() {
   if (view === null) return game;
@@ -275,7 +276,9 @@ async function afterMove(mv, byMe, fenBefore) {
   const idx = meta.length - 1;
   beep(mv.captured ? 330 : 520);
 
-  await board3d.animateMove(mv, game.board());
+  animMover = mover;
+  await board3d.animateMove(mv, game.board(), { actor: !byMe && lm && lm.loaded ? lm : null });
+  animMover = null;
   sel = null;
   renderUI();
   moveBusy = false;
@@ -330,7 +333,8 @@ function tick() {
   const now = performance.now(), dt = now - lastTick;
   lastTick = now;
   if (!running || !timed || meta.length < 1) return;
-  const c = game.turn();
+  if (animMover && animMover === me) return;
+  const c = animMover || game.turn();
   clock[c] -= dt;
   if (c === me && clock[c] < 20000 && !lowWarned) { lowWarned = true; say(pick(L.low), 'shock'); }
   if (clock[c] <= 0) { clock[c] = 0; end(c === me ? 'lose' : 'win', '超时'); }
@@ -605,10 +609,16 @@ window.__dbg3d = { game: () => game, board3d, meta: () => meta };
 
 /* ---------- 对面就座的恶毒（加密 MMD 模型，仅私人使用） ---------- */
 let lm = null, lmLoading = false;
+function syncAvatar() {
+  const on = !!(lm && lm.loaded && $('#showLm').checked);
+  if (lm) lm.avatarOn = on;
+  $('#avatar3d').hidden = !on;
+  $('#avatar').hidden = on;
+}
 const lmStatus = (t, cls = '') => { const el = $('#lmStatus'); el.textContent = t; el.className = cls; };
 async function loadLemalin(pw) {
   if (lmLoading) return;
-  if (lm && lm.loaded) { lm.setVisible(true); return; }
+  if (lm && lm.loaded) { lm.setVisible(true); syncAvatar(); return; }
   if (!pw) { $('#lmRow').hidden = false; lmStatus('输入模型密码后点「载入」'); return; }
   lmLoading = true; lmStatus('解密并载入模型中……');
   const inst = new LemalinMMD(board3d);
@@ -620,6 +630,8 @@ async function loadLemalin(pw) {
     $('#lmRow').hidden = true;
     lmStatus('恶毒已在对面就座 🌙', 'ok');
     lm.setVisible($('#showLm').checked);
+    lm.attachAvatar($('#avatar3d'));
+    syncAvatar();
     say('哈啊……我坐到对面来了哦，指挥官，好好下吧~', 'happy');
   } catch (e) {
     inst.dispose();
@@ -643,6 +655,7 @@ $('#showLm').onchange = () => {
   localStorage.lm3dShow = on ? '1' : '0';
   if (on) loadLemalin(localStorage.lm3dPw || '');
   else { lm?.setVisible(false); $('#lmRow').hidden = true; lmStatus(''); }
+  syncAvatar();
 };
 $('#lmLoad').onclick = () => loadLemalin($('#lmPw').value);
 $('#lmPw').addEventListener('keydown', e => { if (e.key === 'Enter') loadLemalin($('#lmPw').value); });

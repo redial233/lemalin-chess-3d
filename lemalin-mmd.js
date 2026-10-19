@@ -11,7 +11,7 @@ const ENC_URL = 'models/lemalin.enc';
 const VIRTUAL = 'lmvirtual/';
 // 1 MMD 单位 ≈ 8cm；棋盘 1 格 ≈ 10cm（棋盘当作桌面），所以缩放约 0.8
 const SCALE = 0.8;
-const SEAT_DIST = 7.6;   // 椅子离棋盘中心（棋盘本地 z）
+const SEAT_DIST = 6.3;   // 椅子离棋盘中心（棋盘本地 z）
 const FLOOR_Y = -6.3;    // 地面（桌面 = 棋盘 y=0）
 
 let encCache = null;
@@ -68,6 +68,11 @@ export class LemalinMMD {
     this.expr = null;      // { name, t, dur, peak }
     this.tilt = 0; this.tiltTarget = 0;
     this.lookYaw = 0; this.lookYawTarget = 0;
+    this.grab = { active: false, side: '右', target: new THREE.Vector3(), w: 0, grip: 0 };
+    this.reachGap = 0;
+    this.avatar = null;   // { renderer, camera, canvas }
+    this.avatarOn = false;
+    this._avFrame = 0;
     this.blobUrls = [];
     this._frame = dt => this.update(dt);
   }
@@ -180,6 +185,7 @@ export class LemalinMMD {
     anchor.add(body);
     this.body = body;
     this._sitPose();
+    this._storeRest();
     this.anchor = anchor;
     this.board.actorRoot.add(anchor);
     this.board.setEngineColor(this.board.engineColor);
@@ -239,6 +245,143 @@ export class LemalinMMD {
   }
 
   setVisible(v) { if (this.anchor) this.anchor.visible = v; }
+  get visible() { return !!(this.anchor && this.anchor.visible); }
+
+  /* ---------------- 手臂 IK：拿棋子 ---------------- */
+  _storeRest() {
+    this.rest = new Map();
+    for (const side of ['左', '右']) {
+      for (const n of ['腕', '腕捩', 'ひじ', '手捩', '手首']) { const b = this.bones[side + n]; if (b) this.rest.set(b, b.quaternion.clone()); }
+      for (const f of ['親指０', '親指１', '親指２', '人指１', '人指２', '人指３', '中指１', '中指２', '中指３', '薬指１', '薬指２', '薬指３', '小指１', '小指２', '小指３']) {
+        const b = this.bones[side + f]; if (b) this.rest.set(b, b.quaternion.clone());
+      }
+    }
+  }
+  _resetArms() { if (this.rest) for (const [b, q] of this.rest) b.quaternion.copy(q); }
+
+  /** 棋盘逻辑可调用：当前能否做拿子动作 */
+  canGrab() { return !!(this.mesh && this.loaded && this.visible && this.board.actorRoot.visible); }
+  /** 开始一次拿子：按目标在她左/右侧选手 */
+  beginGrab(worldPt) {
+    const l = this.anchor.worldToLocal(worldPt.clone());
+    this.grab.side = l.x >= 0 ? '左' : '右';
+    this.grab.active = true;
+    this.grab.target.copy(worldPt);
+  }
+  /** 每帧：手（握点）目标（世界坐标）、IK 权重 0..1、手指合拢 0..1 */
+  setGrab(worldPt, w, grip) { this.grab.target.copy(worldPt); this.grab.w = w; this.grab.grip = grip; }
+  endGrab() { const u = this.bones['上半身']; if (u) u.rotation.y = 0; this.lookYawTarget = 0; this.grab.active = false; this.grab.w = 0; this.grab.grip = 0; this.reachGap = 0; this._resetArms(); }
+
+  _rotToward(bone, joint, eff, target) {
+    const v1 = eff.clone().sub(joint), v2 = target.clone().sub(joint);
+    if (v1.lengthSq() < 1e-8 || v2.lengthSq() < 1e-8) return;
+    const dq = new THREE.Quaternion().setFromUnitVectors(v1.normalize(), v2.normalize());
+    const wq = bone.getWorldQuaternion(new THREE.Quaternion());
+    const pq = bone.parent.getWorldQuaternion(new THREE.Quaternion());
+    bone.quaternion.copy(pq.invert().multiply(dq.multiply(wq)));
+    bone.updateMatrixWorld(true);
+  }
+
+  _solveGrab() {
+    const g = this.grab, w = g.w;
+    const side = g.side, sgn = side === '左' ? 1 : -1;
+    const B = n => this.bones[side + n];
+    const arm = B('腕'), elbow = B('ひじ'), wrist = B('手首'), mid = B('中指１');
+    if (!arm || !elbow || !wrist || !mid) return;
+    const up = this.bones['上半身'], up2 = this.bones['上半身2'];
+    // 1) 身体前倾 + 侧转（远处格子够不到时）
+    const gl = this.anchor.worldToLocal(g.target.clone());
+    const hd = Math.hypot(gl.x - sgn * 0.8, gl.z + 0.15);
+    const lean = w * THREE.MathUtils.clamp((hd - 2.8) * 0.22, 0, 0.5);
+    const yaw = w * THREE.MathUtils.clamp(Math.atan2(gl.x, Math.max(0.5, gl.z)) * 0.4, -0.4, 0.4);
+    if (up) { up.rotation.x += lean * 0.6; up.rotation.y = yaw; }
+    if (up2) up2.rotation.x += lean * 0.4;
+    this.lookYawTarget = THREE.MathUtils.clamp(Math.atan2(gl.x, Math.max(0.5, gl.z)) * 0.5, -0.5, 0.5) * w;
+    this._resetArms();
+    this.mesh.updateMatrixWorld(true);
+    // 2) 两骨解析 IK：握点 → 手腕目标
+    const S = arm.getWorldPosition(new THREE.Vector3());
+    const E = elbow.getWorldPosition(new THREE.Vector3());
+    const W = wrist.getWorldPosition(new THREE.Vector3());
+    const a = E.distanceTo(S), b = W.distanceTo(E);
+    const fwd = new THREE.Vector3(0, 0, 1).applyQuaternion(this.anchor.getWorldQuaternion(new THREE.Quaternion()));
+    const outward = new THREE.Vector3(sgn, 0, 0).applyQuaternion(this.anchor.getWorldQuaternion(new THREE.Quaternion()));
+    const horiz = g.target.clone().sub(S).setY(0);
+    if (horiz.lengthSq() < 1e-6) horiz.copy(fwd); horiz.normalize();
+    const handDir = new THREE.Vector3(0, -0.8, 0).addScaledVector(horiz, 0.6).normalize();
+    const handLen = mid.getWorldPosition(new THREE.Vector3()).distanceTo(W) * 1.35;
+    const T = g.target.clone().addScaledVector(handDir, -handLen);
+    const ST = T.clone().sub(S); const dRaw = ST.length();
+    const d = THREE.MathUtils.clamp(dRaw, Math.abs(a - b) + 1e-3, (a + b) * 0.999);
+    this.reachGap = Math.max(0, dRaw - (a + b) * 0.999) * w;
+    const n = ST.normalize();
+    const Tr = S.clone().addScaledVector(n, d);
+    const pole = new THREE.Vector3(0, -1, 0).addScaledVector(outward, 0.9).addScaledVector(fwd, -0.25);
+    pole.addScaledVector(n, -pole.dot(n)).normalize();
+    const x = (a * a - b * b + d * d) / (2 * d), h = Math.sqrt(Math.max(0, a * a - x * x));
+    const Ed = S.clone().addScaledVector(n, x).addScaledVector(pole, h);
+    this._rotToward(arm, S, E, Ed);
+    const E2 = elbow.getWorldPosition(new THREE.Vector3()), W2 = wrist.getWorldPosition(new THREE.Vector3());
+    this._rotToward(elbow, E2, W2, Tr);
+    const W3 = wrist.getWorldPosition(new THREE.Vector3()), M3 = mid.getWorldPosition(new THREE.Vector3());
+    this._rotToward(wrist, W3, M3, W3.clone().add(handDir));
+    // 3) 与坐姿按权重混合
+    for (const bn of [arm, elbow, wrist]) {
+      const sol = bn.quaternion.clone();
+      bn.quaternion.copy(this.rest.get(bn)).slerp(sol, w);
+    }
+    // 4) 手指合拢（伸手时微张）
+    const grip = g.grip, open = (1 - grip) * w * 0.15;
+    for (const f of ['人指', '中指', '薬指', '小指']) {
+      for (const [i, k] of [['１', 0.9], ['２', 1.15], ['３', 0.9]]) {
+        const fb = B(f + i); if (fb) fb.rotation.set(0, 0, -sgn * (grip * k - open));
+      }
+    }
+    const t1 = B('親指１'), t2 = B('親指２');
+    if (t1) t1.rotation.set(0, sgn * grip * 0.5, -sgn * grip * 0.25);
+    if (t2) t2.rotation.set(0, sgn * grip * 0.6, 0);
+  }
+
+  /** 世界坐标：她手的握点（中指根附近），用于调试/截图 */
+  handWorld() {
+    const m = this.bones[this.grab.side + '中指２'];
+    return m ? m.getWorldPosition(new THREE.Vector3()) : null;
+  }
+
+  /* ---------------- 右侧 3D 头像（同一模型、同一骨骼状态） ---------------- */
+  attachAvatar(canvas) {
+    if (this.avatar) return;
+    const main = this.board.renderer;
+    const r = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true });
+    r.setPixelRatio(Math.min(2, window.devicePixelRatio || 1));
+    r.setSize(canvas.clientWidth || 192, canvas.clientHeight || 192, false);
+    r.outputColorSpace = main.outputColorSpace;
+    r.toneMapping = main.toneMapping;
+    r.toneMappingExposure = main.toneMappingExposure * 1.08;
+    r.shadowMap.enabled = false;
+    const cam = new THREE.PerspectiveCamera(24, 1, 6.2, 40);
+    this.avatar = { renderer: r, camera: cam, canvas };
+  }
+  _renderAvatar() {
+    const av = this.avatar;
+    if (!av || !this.avatarOn || !this.visible) return;
+    if ((this._avFrame++ & 1) === 1) return;   // 半帧率，省性能
+    const head = this.bones['頭']; if (!head) return;
+    const scene = this.board.scene;
+    const actorVis = this.board.actorRoot.visible;
+    this.board.actorRoot.visible = true;          // 交战特写时主画面隐藏她，头像照常
+    this.board.actorRoot.updateMatrixWorld(true);
+    const hp = head.getWorldPosition(new THREE.Vector3());
+    const aq = this.anchor.getWorldQuaternion(new THREE.Quaternion());
+    const fwd = new THREE.Vector3(0, 0, 1).applyQuaternion(aq);
+    const look = hp.clone().add(new THREE.Vector3(0, -0.25, 0));
+    av.camera.position.copy(look).addScaledVector(fwd, 8.2).add(new THREE.Vector3(0, 0.7, 0));
+    av.camera.lookAt(look);
+    const fog = scene.fog; scene.fog = null;
+    av.renderer.render(scene, av.camera);
+    scene.fog = fog;
+    this.board.actorRoot.visible = actorVis;
+  }
 
   _setMorph(name, w) {
     this.weights[name] = w;
@@ -273,7 +416,7 @@ export class LemalinMMD {
   }
 
   update(dt) {
-    if (!this.mesh || !this.anchor.visible || !this.board.actorRoot.visible) return;
+    if (!this.mesh || !this.anchor.visible) return;
     this.t += dt;
     // 呼吸：上半身轻微起伏
     const br = Math.sin(this.t * 1.7);
@@ -305,7 +448,9 @@ export class LemalinMMD {
       for (const n of e.names) this._setMorph(n, u >= 1 ? 0 : w * e.peak);
       if (u >= 1) this.expr = null;
     }
+    if (this.grab.active) this._solveGrab();
     this._applyBoneMorphs();
+    this._renderAvatar();
   }
 
   dispose() {
@@ -321,6 +466,7 @@ export class LemalinMMD {
     this.blobUrls = [];
     const i = this.board.onFrame.indexOf(this._frame);
     if (i >= 0) this.board.onFrame.splice(i, 1);
+    if (this.avatar) { this.avatar.renderer.dispose(); this.avatar = null; }
     this.mesh = null; this.anchor = null;
   }
 }

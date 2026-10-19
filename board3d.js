@@ -511,7 +511,7 @@ export class Board3D {
     this._updateMarkers();
   }
 
-  animateMove(mv, boardAfter) {
+  animateMove(mv, boardAfter, opts = {}) {
     const fromObj = this.pieces.get(mv.from);
     if (!fromObj) {
       this.syncPosition(boardAfter);
@@ -520,6 +520,10 @@ export class Board3D {
     // 吃子 + 开启特写 → 交战电影镜头
     if (mv.captured && this.cinematicCaptures) {
       return this._animateCombatCapture(mv, boardAfter, fromObj);
+    }
+    // 对面的恶毒亲手拿子
+    if (opts.actor && opts.actor.canGrab && opts.actor.canGrab()) {
+      return this._animateGrabMove(mv, boardAfter, fromObj, opts.actor);
     }
     return this._animateNormalMove(mv, boardAfter, fromObj);
   }
@@ -625,6 +629,134 @@ export class Board3D {
         return true;
       };
       this._anims.push(tick);
+    });
+  }
+
+  _gripHeight(mesh) {
+    if (mesh.userData.gripH === undefined) {
+      const box = new THREE.Box3().setFromObject(mesh);
+      mesh.userData.gripH = Math.max(0.35, (box.max.y - mesh.getWorldPosition(new THREE.Vector3()).y) * 0.72);
+    }
+    return mesh.userData.gripH;
+  }
+
+  /**
+   * 恶毒亲手走子：伸手 → 手指合拢 → 抬起 → 移到目标格 → 放下 → 松手 → 收回
+   * 吃子（未开特写）时先把被吃的子拿到棋盘旁。棋子沿脚本路径移动，手臂 IK 追同一点；
+   * 远处够不到时身体前倾，仍够不到的部分由“魔力”托着棋子浮过去（带星屑）。
+   */
+  _animateGrabMove(mv, boardAfter, fromObj, actor) {
+    return new Promise(resolve => {
+      this.animating = true;
+      this.inputLocked = true;
+      this.sel = null;
+      this._updateMarkers();
+      this._clearTrails();
+      const V = (x, y, z) => new THREE.Vector3(x, y, z);
+      const sqP = (sq, y = 0) => { const [x, z] = this._sqToXZ(sq); return V(x, y, z); };
+      const [tx, tz] = this._sqToXZ(mv.to);
+      const end = V(tx, 0, tz);
+      const isPromo = !!mv.promotion;
+      const { capSq, capObj, capPos } = this._resolveCapTarget(mv);
+      if (capObj) this.pieces.delete(capSq);
+      const rookAnim = this._resolveRookAnim(mv);
+      this.pieces.delete(mv.from);
+      const gH = this._gripHeight(fromObj.mesh);
+      const A = fromObj.mesh.position.clone().setY(gH), Bp = end.clone().setY(gH);
+      const LIFT = 0.95, UP = V(0, 1, 0);
+      const herSide = this.engineColor === 'b' ? -1 : 1;
+      const segs = [];
+      let capFaded = false;
+      const ease = u => u * u * (3 - 2 * u);
+      const lerp = (a, b, u) => a.clone().lerp(b, u);
+      // —— 先处理被吃的子：拿到棋盘旁边 ——
+      if (capObj) {
+        const cH = this._gripHeight(capObj.mesh);
+        const C = capPos.clone().setY(cH);
+        const tray = V((capPos.x >= 0 ? 1 : -1) * 4.8, cH, herSide * 3.4);
+        segs.push({ tag: 'reach', d: 0.45, p: u => C.clone().addScaledVector(UP, 0.7), w: u => ease(u), g: () => 0 });
+        segs.push({ tag: 'reach', d: 0.15, p: u => lerp(C.clone().addScaledVector(UP, 0.7), C, ease(u)), w: () => 1, g: () => 0 });
+        segs.push({ tag: 'capgrip', d: 0.1, p: () => C, w: () => 1, g: u => u });
+        segs.push({ tag: 'caplift', d: 0.2, p: u => lerp(C, C.clone().addScaledVector(UP, LIFT), ease(u)), w: () => 1, g: () => 1, hold: capObj, hH: cH });
+        segs.push({ tag: 'capcarry', d: 0.45, p: u => { const v = lerp(C.clone().addScaledVector(UP, LIFT), tray.clone().addScaledVector(UP, LIFT * 0.6), ease(u)); v.y += Math.sin(u * Math.PI) * 0.3; return v; }, w: () => 1, g: () => 1, hold: capObj, hH: cH });
+        segs.push({ tag: 'caplower', d: 0.18, p: u => lerp(tray.clone().addScaledVector(UP, LIFT * 0.6), tray, ease(u)), w: () => 1, g: () => 1, hold: capObj, hH: cH });
+        segs.push({ tag: 'caprelease', d: 0.1, p: () => tray, w: () => 1, g: u => 1 - u, onEnd: () => { capFaded = true; this._fadeOutPiece(capObj.mesh); } });
+        segs.push({ tag: 'transit', d: 0.4, p: u => { const v = lerp(tray, A.clone().addScaledVector(UP, 0.7), ease(u)); v.y += Math.sin(u * Math.PI) * 0.4; return v; }, w: () => 1, g: () => 0 });
+      } else {
+        segs.push({ d: 0.5, p: () => A.clone().addScaledVector(UP, 0.7), w: u => ease(u), g: () => 0 });
+      }
+      // —— 拿起要走的子 ——
+      segs.push({ d: 0.18, p: u => lerp(A.clone().addScaledVector(UP, 0.7), A, ease(u)), w: () => 1, g: () => 0 });
+      segs.push({ d: 0.12, p: () => A, w: () => 1, g: u => u, tag: 'grip' });
+      segs.push({ d: 0.22, p: u => lerp(A, A.clone().addScaledVector(UP, LIFT), ease(u)), w: () => 1, g: () => 1, hold: fromObj, hH: gH, tag: 'lift' });
+      segs.push({ d: 0.5, p: u => { const v = lerp(A.clone().addScaledVector(UP, LIFT), Bp.clone().addScaledVector(UP, LIFT), ease(u)); v.y += Math.sin(u * Math.PI) * 0.35; return v; }, w: () => 1, g: () => 1, hold: fromObj, hH: gH, rook: true, tag: 'carry' });
+      segs.push({ d: 0.22, p: u => lerp(Bp.clone().addScaledVector(UP, LIFT), Bp, ease(u)), w: () => 1, g: () => 1, hold: fromObj, hH: gH, tag: 'lower' });
+      segs.push({ d: 0.1, p: () => Bp, w: () => 1, g: u => 1 - u, tag: 'release', onEnd: () => {
+        this.bursts.burst(end.x, 0.2, end.z, { count: 8, color: mv.color === 'w' ? 0xc8b6ff : 0x8fe3ff, speed: 1.0, life: 0.3 });
+        placed = true;
+        this._finishMovePlacement(mv, boardAfter, fromObj, end, rookAnim, isPromo);
+        resolve();   // 棋局继续；收手动作不阻塞输入
+      } });
+      segs.push({ d: 0.45, p: u => lerp(Bp, Bp.clone().addScaledVector(UP, 0.9), ease(u)), w: u => 1 - ease(u), g: () => 0, tag: 'retract' });
+
+      const toWorld = v => this.pieceRoot.localToWorld(v.clone());
+      actor.beginGrab(toWorld(capObj ? capPos.clone().setY(1) : A));
+      this.grabPhase = segs[0].tag || 'reach';
+      let i = 0, t = 0, lastSpark = 0, rookT = 0, placed = false;
+      const tick = (dt) => {
+        if (!actor.mesh || !actor.visible) { // 模型被卸载/隐藏：直接落子
+          if (!placed) {
+            if (capObj && !capFaded) { this.pieceRoot.remove(capObj.mesh); this._disposeMesh(capObj.mesh); }
+            placed = true;
+            this._finishMovePlacement(mv, boardAfter, fromObj, end, rookAnim, isPromo); resolve();
+          }
+          if (actor.mesh) actor.endGrab();
+          this.grabPhase = null;
+          return false;
+        }
+        t += dt;
+        let s = segs[i];
+        while (t >= s.d) {
+          t -= s.d;
+          if (s.hold) { const pt = s.p(1); s.hold.mesh.position.set(pt.x, pt.y - s.hH, pt.z); }
+          if (s.onEnd) s.onEnd();
+          i++;
+          if (i >= segs.length) { actor.endGrab(); this.grabPhase = null; return false; }
+          s = segs[i];
+        }
+        const u = Math.min(1, t / s.d);
+        const pt = s.p(u);
+        this.grabPhase = s.tag || 'reach';
+        actor.setGrab(toWorld(pt), s.w(u), s.g(u));
+        if (s.hold) {
+          s.hold.mesh.position.set(pt.x, pt.y - s.hH, pt.z);
+          if (actor.reachGap > 0.3 && t - lastSpark > 0.05) {   // 够不到：魔力托举
+            lastSpark = t;
+            this._spawnTrailGhost(s.hold.mesh.position, 0xc8b6ff);
+          }
+        }
+        if (s.rook && rookAnim) {
+          rookT = Math.min(1, rookT + dt / s.d);
+          rookAnim.mesh.position.lerpVectors(rookAnim.start, rookAnim.end, ease(rookT));
+          rookAnim.mesh.position.y = Math.sin(rookT * Math.PI) * 0.3;
+        }
+        return true;
+      };
+      this._anims.push(tick);
+    });
+  }
+
+  _fadeOutPiece(mesh) {
+    const p = mesh.position.clone();
+    this.bursts.burst(p.x, 0.5, p.z, { count: 16, color: 0xc8b6ff, speed: 1.6, life: 0.5 });
+    let t = 0;
+    this._anims.push(dt => {
+      t += dt;
+      const u = Math.min(1, t / 0.45);
+      mesh.scale.setScalar(Math.max(0.02, 1 - u));
+      mesh.position.y = p.y - u * 0.3;
+      if (u >= 1) { this.pieceRoot.remove(mesh); this._disposeMesh(mesh); return false; }
+      return true;
     });
   }
 
@@ -1372,7 +1504,7 @@ export class Board3D {
   }
 
   _loop() {
-    const dt = Math.min(0.05, this._clock.getDelta());
+    const dt = Math.min(0.05, this._clock.getDelta()) * (this.timeScale ?? 1);
     this.controls.update();
     this._anims = this._anims.filter(fn => fn(dt));
     this._updateFx(dt);
