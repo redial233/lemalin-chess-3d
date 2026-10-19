@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>恶毒的月夜棋盘 · 3D</title>
+<link rel="stylesheet" href="style.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><path d='M20 4a12 12 0 1 0 8 20A10 10 0 0 1 20 4z' fill='%23cfe8ff'/></svg>">
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/"
+  }
+}
+</script>
+</head><body>
+<div id="bgArt"></div><div id="stars"></div>
+<header><h1>🌙 恶毒的月夜棋盘 · 3D <small>Le Malin · Échecs nocturnes · Three.js</small></h1></header>
+<main>
+ <section id="left" class="panel">
+  <h2>对局设置</h2>
+  <label>时制<select id="tc">
+   <option value="1+0">1+0 子弹</option><option value="3+2">3+2 闪电</option><option value="5+3">5+3 闪电</option>
+   <option value="10+5" selected>10+5 快棋</option><option value="15+10">15+10 快棋</option><option value="30+20">30+20 慢棋</option>
+   <option value="none">不限时</option><option value="custom">自定义…</option></select></label>
+  <div id="customTc" hidden><label>分钟<input id="cMin" type="number" min="0.5" step="0.5" value="20"></label><label>每步加秒<input id="cInc" type="number" min="0" value="5"></label></div>
+  <label>执子<select id="side"><option value="w">白方（先手）</option><option value="b">黑方</option><option value="r">随机</option></select></label>
+  <label>引擎棋力 <b id="lvlTxt"></b><input id="lvl" type="range" min="0" max="20" value="5"></label>
+  <label class="chk"><input id="useElo" type="checkbox">按 Elo 限制</label>
+  <label id="eloRow" hidden>Elo <b id="eloTxt">1500</b><input id="elo" type="range" min="1320" max="3000" step="10" value="1500"></label>
+  <label class="chk"><input id="liveFb" type="checkbox" checked>实时评价我的每一步</label>
+  <label class="chk"><input id="snd" type="checkbox" checked>音效</label>
+  <label>画风<select id="artStyle"><option value="pixel">像素风（默认）</option><option value="vector">矢量 Q 版</option></select></label>
+  <button id="newGame" class="primary">✦ 开始新对局</button>
+  <div class="btnrow"><button id="hint">💡 提示</button><button id="undo">↶ 悔棋</button></div>
+  <div class="btnrow"><button id="flip">⇅ 翻转视角</button><button id="resign">🏳 认输</button></div>
+  <div class="btnrow"><button id="reviewBtn">🔍 复盘分析</button><button id="pgnBtn">📜 PGN</button></div>
+  <p class="hint-cam">镜头：右键拖动旋转 · 滚轮缩放 · 中键平移<br>触控：单指拖转 · 双指缩放 · 轻点选子</p>
+  <div id="opening"><div class="ttl">开局</div><div id="opName">—</div><div id="opVar"></div><div id="opBook"></div></div>
+ </section>
+ <section id="center">
+  <div class="clock" id="clockTop"><span class="who"></span><span class="t">--:--</span></div>
+  <div id="boardWrap">
+   <div id="evalBar"><div id="evalFill"></div><span id="evalTxt">0.0</span></div>
+   <div id="boardBox"><div id="board3d"></div>
+    <div id="promo" hidden></div></div>
+  </div>
+  <div class="clock" id="clockBot"><span class="who"></span><span class="t">--:--</span></div>
+  <div id="review" hidden>
+   <div class="rvhead"><span id="rvPct"></span><button id="rvExit">✕ 退出复盘</button></div>
+   <div id="rvProg"><div id="rvBar"></div></div>
+   <div id="rvGraph"></div>
+   <div class="btnrow"><button id="rvFirst">⏮</button><button id="rvPrev">◀</button><button id="rvNext">▶</button><button id="rvLast">⏭</button></div>
+   <div id="rvInfo"></div>
+   <div class="ttl">关键时刻</div><div id="rvKeys"></div>
+  </div>
+ </section>
+ <section id="right" class="panel">
+  <div id="secretary">
+   <div id="avatar"></div>
+   <div id="bubble">哈啊……指挥官，这是立体棋盘哦。左边选好时制和棋力，点「开始新对局」吧~</div>
+  </div>
+  <h2>棋谱</h2>
+  <div id="moves"></div>
+  <div id="fbLast"></div>
+  <div id="summary" hidden></div>
+ </section>
+</main>
+<div id="pgnModal" hidden><div class="box"><h2>📜 PGN 导入 / 导出</h2>
+ <textarea id="pgnText" placeholder="把 PGN 粘贴到这里，点「导入并复盘」"></textarea>
+ <div class="btnrow"><button id="pgnCopy">复制当前棋谱</button><button id="pgnDl">下载 .pgn</button><button id="pgnLoad">导入并复盘</button><button id="pgnClose">关闭</button></div></div></div>
+<footer>3D · Three.js · 引擎 Stockfish 16（GPLv3）· 规则 chess.js · 基于恶毒的月夜棋盘 · 仅为同人练习作品</footer>
+<script type="module" src="app.js"></script>
+</body></html>
