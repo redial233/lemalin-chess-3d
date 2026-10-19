@@ -78,6 +78,7 @@ const L = {
 };
 const pick = a => a[Math.floor(Math.random() * a.length)];
 let mood = 'sleepy', frame = 0, tick2 = 0;
+let lm = null, lmLoading = false;
 const artPixel = () => $('#artStyle').value === 'pixel';
 function drawAvatar() {
   if (!artPixel()) { $('#avatar').innerHTML = chibiSVG(mood); return; }
@@ -87,7 +88,10 @@ function drawAvatar() {
   drawGrid(c, blink ? blinkFrame(mood) : lemalin(mood, frame), 4);
 }
 setInterval(() => { tick2++; frame = tick2 % 2; if (artPixel()) drawAvatar(); }, 700);
-function say(t, m = 'sleepy') { $('#bubble').textContent = t; mood = m; drawAvatar(); }
+function say(t, m = 'sleepy') {
+  $('#bubble').textContent = t; mood = m; drawAvatar();
+  if (lm && lm.loaded && lm.visible) lm.speak(t);
+}
 function drawBg() {
   if (artPixel()) { $('#bgArt').innerHTML = '<canvas class="px"></canvas>'; drawBackground($('#bgArt canvas')); }
   else $('#bgArt').innerHTML = backgroundSVG();
@@ -284,8 +288,10 @@ async function afterMove(mv, byMe, fenBefore) {
   moveBusy = false;
   if (lm && lm.loaded) {
     lm.lookAtSquare(board3d._sqToXZ(mv.to)[0], board3d._sqToXZ(mv.to)[1]);
-    if (game.inCheck()) lm.react('check');
+    if (!byMe && game.inCheck()) lm.react('checkGive');       // 她将军玩家
+    else if (byMe && game.inCheck()) lm.react('check');         // 玩家将军她
     else if (mv.captured) lm.react(byMe ? 'captured' : 'capture');
+    else if (!byMe) lm.react(Math.random() < 0.45 ? 'nod' : 'smug');
   }
 
   const my = token;
@@ -388,6 +394,7 @@ $('#newGame').onclick = () => {
   if (timed) { const [m, i] = tc.split('+').map(Number); clock.w = clock.b = m * 60000; inc = i; }
   running = true; lastTick = performance.now();
   say(pick(L.start));
+  lm?.react('start');
   renderUI();
   if (me === 'b') engineMove(token);
 };
@@ -608,7 +615,6 @@ $('#pgnClose').onclick = () => $('#pgnModal').hidden = true;
 window.__dbg3d = { game: () => game, board3d, meta: () => meta };
 
 /* ---------- 对面就座的恶毒（加密 MMD 模型，仅私人使用） ---------- */
-let lm = null, lmLoading = false;
 function syncAvatar() {
   const on = !!(lm && lm.loaded && $('#showLm').checked);
   if (lm) lm.avatarOn = on;

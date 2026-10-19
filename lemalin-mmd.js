@@ -73,6 +73,14 @@ export class LemalinMMD {
     this.avatar = null;   // { renderer, camera, canvas }
     this.avatarOn = false;
     this._avFrame = 0;
+    // 口型：文字时间轴 或 外部音频驱动（二选一，音频优先）
+    this.talk = { active: false, t: 0, dur: 0, keys: [], cur: '', open: 0 };
+    this.audioMouth = { amp: 0, viseme: null, ts: 0 };  // 有声库时：setMouthFromAudio({amp,viseme})
+    // 手势：空闲 / 反应；拿子时暂停身体手势
+    this.gest = null;   // { name, t, dur }
+    this.nextIdle = 3.5;
+    this.mode = 'idle';  // idle | think | grab
+    this.poseOff = { lean: 0, leanY: 0, armL: [0,0,0], armR: [0,0,0], elbL: 0, elbR: 0, wristL: 0, wristR: 0, hipL: 0, hipR: 0, headP: 0 };
     this.blobUrls = [];
     this._frame = dt => this.update(dt);
   }
@@ -251,7 +259,10 @@ export class LemalinMMD {
   _storeRest() {
     this.rest = new Map();
     for (const side of ['左', '右']) {
-      for (const n of ['腕', '腕捩', 'ひじ', '手捩', '手首']) { const b = this.bones[side + n]; if (b) this.rest.set(b, b.quaternion.clone()); }
+      for (const n of ['肩', '腕', '腕捩', 'ひじ', '手捩', '手首', '足', 'ひざ', '足首']) {
+        const b = this.bones[side + n]; if (b) this.rest.set(b, b.quaternion.clone());
+        const bd = this.bones[side + n + 'D']; if (bd) this.rest.set(bd, bd.quaternion.clone());
+      }
       for (const f of ['親指０', '親指１', '親指２', '人指１', '人指２', '人指３', '中指１', '中指２', '中指３', '薬指１', '薬指２', '薬指３', '小指１', '小指２', '小指３']) {
         const b = this.bones[side + f]; if (b) this.rest.set(b, b.quaternion.clone());
       }
@@ -389,69 +400,315 @@ export class LemalinMMD {
     if (i !== undefined && !this.boneMorphs[name]) this.mesh.morphTargetInfluences[i] = w;
   }
 
-  /** 表情反应：'capture' 吃子 / 'captured' 被吃 / 'check' 将军 / 'think' 思考 / 'idle' */
+  /* ==================== 口型 ====================
+   * 优先：setMouthFromAudio({ amp, viseme }) —— 有声库时按音量/音素动嘴
+   * 回退：speak(text) —— 按气泡文字生成 a/i/u/e/o 时间轴
+   * 气泡结束 / stopSpeak() → 闭嘴
+   */
+  static _visemeOf(ch) {
+    if (!ch || /\s/.test(ch)) return null;
+    if (/[、，。！？!?～…·・,.;:…]/.test(ch)) return null; // 停顿
+    // 日文假名 / 直接元音
+    if (/[あアぁァかカさサたタなナはハまマやヤらラわワがガざザだダばバぱパ]/.test(ch)) return 'あ';
+    if (/[いイぃィきキしシちチにニひヒみミりリゐヰぎギじジぢヂびビぴピ]/.test(ch)) return 'い';
+    if (/[うウぅゥくクすスつツぬヌふフむムゆユるルをヲぐグずズづヅぶブぷプ]/.test(ch)) return 'う';
+    if (/[えエぇェけケせセてテねネへヘめメれレゑヱげゲぜゼでデべベぺペ]/.test(ch)) return 'え';
+    if (/[おオぉォこコそソとトのノほホもモよヨろロごゴぞゾどドぼボぽポ]/.test(ch)) return 'お';
+    if (/[aAあ]/.test(ch)) return 'あ';
+    if (/[iIyYい]/.test(ch)) return 'い';
+    if (/[uUwWう]/.test(ch)) return 'う';
+    if (/[eEえ]/.test(ch)) return 'え';
+    if (/[oOお]/.test(ch)) return 'お';
+    // 汉字粗分：按 Unicode 取模轮换，带一点开口偏好
+    const code = ch.codePointAt(0) || 0;
+    return ['あ', 'い', 'う', 'え', 'お', 'あ', 'ん'][code % 7];
+  }
+
+  /** 气泡台词 → 口型时间轴。dur 可覆盖；默认跟字数对齐（约 90ms/字，至少 1.1s） */
+  speak(text, { dur } = {}) {
+    if (!this.mesh || !text) return;
+    const chars = [...String(text)];
+    const d = dur ?? Math.max(1.1, Math.min(6.5, chars.length * 0.09 + 0.4));
+    const keys = [];
+    let t = 0.08;
+    const step = d / Math.max(1, chars.length + 1);
+    for (const ch of chars) {
+      const v = LemalinMMD._visemeOf(ch);
+      keys.push({ t, v, open: v ? (v === 'ん' ? 0.25 : v === 'い' ? 0.45 : v === 'う' ? 0.55 : 0.85) : 0 });
+      t += step * (v ? 1 : 1.4);
+    }
+    keys.push({ t: d, v: null, open: 0 });
+    this.talk = { active: true, t: 0, dur: d, keys, cur: '', open: 0 };
+  }
+
+  stopSpeak() {
+    this.talk.active = false;
+    this.talk.open = 0;
+    this.talk.cur = '';
+    for (const n of ['あ', 'い', 'う', 'え', 'お', 'ん', 'あ２', '□', 'ワ']) this._setMorph(n, 0);
+  }
+
+  /**
+   * 有声库后接这里：每帧或按音素回调。
+   * amp 0..1 开口幅度；viseme 可选 'あ'|'い'|'う'|'え'|'お'|'ん'|null
+   * 超过 ~150ms 没更新会自动退回文字口型 / 闭嘴。
+   */
+  setMouthFromAudio({ amp = 0, viseme = null } = {}) {
+    this.audioMouth = { amp: Math.max(0, Math.min(1, amp)), viseme, ts: performance.now() };
+  }
+
+  _updateMouth(dt) {
+    // 清掉上帧口型
+    for (const n of ['あ', 'い', 'う', 'え', 'お', 'ん', 'あ２']) {
+      if (this.weights[n]) this._setMorph(n, 0);
+    }
+    const audioFresh = performance.now() - this.audioMouth.ts < 150;
+    let vis = null, open = 0;
+    if (audioFresh && this.audioMouth.amp > 0.02) {
+      open = this.audioMouth.amp;
+      vis = this.audioMouth.viseme || 'あ';
+    } else if (this.talk.active) {
+      this.talk.t += dt;
+      const keys = this.talk.keys;
+      let k = keys[0];
+      for (const x of keys) if (this.talk.t >= x.t) k = x;
+      vis = k.v; open = k.open;
+      // 音节内微抖，更像说话
+      if (open > 0.05) open *= 0.82 + 0.18 * Math.sin(this.talk.t * 28);
+      if (this.talk.t >= this.talk.dur) this.stopSpeak();
+    }
+    this.talk.cur = vis || '';
+    this.talk.open = open;
+    if (vis && open > 0.02) this._setMorph(vis === 'ん' ? 'ん' : vis, open);
+  }
+
+  /* ==================== 手势 / 表情 ==================== */
+  _playGest(name, dur) {
+    // 拿子时只允许纯表情类
+    const faceOnly = { yawn: 1, wink: 1 };
+    if (this.grab.active && !faceOnly[name]) return;
+    this.gest = { name, t: 0, dur };
+  }
+
+  /** 表情 + 身体反应 */
   react(kind) {
     if (!this.mesh) return;
-    if (kind === 'think') { this.tiltTarget = 0.16; return; }
-    if (kind === 'idle') { this.tiltTarget = 0; return; }
-    const map = {
-      capture: { names: ['笑い', '口角上げ'], dur: 1.7, peak: 0.9 },
-      captured: { names: ['困る', '口角下げ'], dur: 1.7, peak: 0.85 },
-      check: { names: ['びっくり', 'お'], dur: 1.4, peak: 0.8 },
-      win: { names: ['にこり', 'にっこり'], dur: 3.2, peak: 1.0 },
-      lose: { names: ['じと目', '口角下げ'], dur: 3.2, peak: 0.75 },
+    if (kind === 'think') {
+      this.mode = 'think';
+      this.tiltTarget = 0.14;
+      this._playGest(Math.random() < 0.55 ? 'chin' : 'sigh', 2.4 + Math.random());
+      this._face(['真面目'], 2.2, 0.55);
+      return;
+    }
+    if (kind === 'idle') {
+      this.mode = 'idle';
+      this.tiltTarget = 0;
+      this.nextIdle = 1.5 + Math.random() * 2;
+      return;
+    }
+    const face = {
+      capture: { names: ['笑い', '口角上げ'], dur: 1.8, peak: 0.9, gest: 'wave' },
+      captured: { names: ['困る', '口角下げ'], dur: 1.8, peak: 0.85, gest: 'flinch' },
+      check: { names: ['びっくり', 'お'], dur: 1.5, peak: 0.85, gest: 'cover' },  // 被将军
+      checkGive: { names: ['にこり', '口角上げ'], dur: 1.6, peak: 0.9, gest: 'wave' },
+      win: { names: ['にこり', 'にっこり'], dur: 3.5, peak: 1.0, gest: 'cheer' },
+      lose: { names: ['じと目', '口角下げ'], dur: 3.5, peak: 0.75, gest: 'slump' },
+      nod: { names: ['にこり'], dur: 1.2, peak: 0.6, gest: 'nod' },
+      smug: { names: ['笑い', '口角上げ'], dur: 1.5, peak: 0.75, gest: 'smug' },
+      start: { names: ['なごみ'], dur: 2.0, peak: 0.6, gest: 'settle' },
+      yawn: { names: ['あ'], dur: 1.8, peak: 0.7, gest: 'yawn' },
     };
-    const m = map[kind];
+    const m = face[kind];
     if (!m) return;
-    if (this.expr) for (const n of this.expr.names) this._setMorph(n, 0);
-    this.expr = { ...m, t: 0 };
+    this._face(m.names, m.dur, m.peak);
+    if (m.gest) this._playGest(m.gest, m.dur);
     this.tiltTarget = 0;
   }
 
-  /** 头部略微看向某格（棋盘本地 x,z） */
+  _face(names, dur, peak) {
+    if (this.expr) for (const n of this.expr.names) this._setMorph(n, 0);
+    this.expr = { names, dur, peak, t: 0 };
+  }
+
   lookAtSquare(x, z) {
     if (!this.anchor) return;
-    const side = this.board.engineColor === 'b' ? 1 : -1; // 角色朝向
+    const side = this.board.engineColor === 'b' ? 1 : -1;
     this.lookYawTarget = THREE.MathUtils.clamp(side * x * 0.06, -0.35, 0.35);
+  }
+
+  _pickIdle() {
+    const pool = this.mode === 'think'
+      ? ['chin', 'sigh', 'lookBoard', 'lookPlayer']
+      : ['stretch', 'chin', 'swingFoot', 'lookBoard', 'lookPlayer', 'yawn', 'wink'];
+    return pool[(Math.random() * pool.length) | 0];
+  }
+
+  /** u=0..1 手势姿态 → poseOff */
+  _evalGest(u) {
+    const o = this.poseOff;
+    const ez = x => x * x * (3 - 2 * x);
+    const env = u < 0.18 ? ez(u / 0.18) : u > 0.78 ? ez((1 - u) / 0.22) : 1;
+    const n = this.gest.name;
+    // 清零
+    o.lean = 0; o.leanY = 0;
+    o.armL = [0, 0, 0]; o.armR = [0, 0, 0];
+    o.elbL = 0; o.elbR = 0; o.wristL = 0; o.wristR = 0;
+    o.hipL = 0; o.hipR = 0; o.headP = 0;
+    const A = (side, v) => { if (side === 'L') o.armL = v; else o.armR = v; };
+    if (n === 'stretch') {
+      o.lean = -0.18 * env;
+      A('L', [0.55 * env, 0, -1.1 * env]); A('R', [0.55 * env, 0, 1.1 * env]);
+      o.elbL = -0.3 * env; o.elbR = -0.3 * env;
+      o.headP = -0.15 * env;
+    } else if (n === 'chin') {
+      // 右手托腮
+      A('R', [0.35 * env, -0.4 * env, 0.95 * env]);
+      o.elbR = -1.4 * env; o.wristR = 0.5 * env;
+      o.leanY = -0.08 * env; o.headP = 0.08 * env;
+      this.tiltTarget = 0.12 * env;
+    } else if (n === 'swingFoot') {
+      const w = Math.sin(u * Math.PI * 4) * env;
+      o.hipL = 0.25 * w; o.hipR = -0.15 * w;
+    } else if (n === 'lookBoard') {
+      this.lookYawTarget = 0;
+      o.headP = 0.22 * env;
+    } else if (n === 'lookPlayer') {
+      this.lookYawTarget = 0;
+      o.headP = -0.12 * env;
+    } else if (n === 'yawn') {
+      o.lean = -0.06 * env; o.headP = -0.2 * env;
+      A('L', [0.2 * env, 0, -0.3 * env]);
+      // 打哈欠开口由表情 'あ' 承担，这里顺便抬手挡一下
+    } else if (n === 'sigh') {
+      o.lean = 0.1 * env * Math.sin(u * Math.PI);
+      o.headP = 0.1 * env;
+    } else if (n === 'nod') {
+      o.headP = 0.28 * Math.sin(u * Math.PI * 2) * env;
+    } else if (n === 'smug' || n === 'wave') {
+      A('L', [-0.15 * env, 0.2 * env, -0.9 * env]);
+      o.elbL = -0.8 * env;
+      o.wristL = 0.4 * Math.sin(u * Math.PI * 3) * env;
+      o.headP = -0.05 * env;
+    } else if (n === 'flinch') {
+      o.lean = 0.2 * env; o.headP = 0.15 * env;
+      A('L', [0.2 * env, 0, -0.4 * env]); A('R', [0.2 * env, 0, 0.4 * env]);
+    } else if (n === 'cover') {
+      // 双手捂嘴
+      A('L', [0.5 * env, 0.3 * env, -0.7 * env]); A('R', [0.5 * env, -0.3 * env, 0.7 * env]);
+      o.elbL = -1.6 * env; o.elbR = -1.6 * env;
+      o.headP = 0.1 * env;
+    } else if (n === 'cheer') {
+      A('L', [0.8 * env, 0, -1.0 * env]); A('R', [0.8 * env, 0, 1.0 * env]);
+      o.elbL = -0.5 * env; o.elbR = -0.5 * env;
+      o.headP = -0.1 * env; o.lean = -0.1 * env;
+    } else if (n === 'slump') {
+      o.lean = 0.28 * env; o.headP = 0.25 * env;
+      A('L', [0.15 * env, 0, -0.2 * env]); A('R', [0.15 * env, 0, 0.2 * env]);
+    } else if (n === 'settle') {
+      o.lean = 0.08 * Math.sin(u * Math.PI) * env;
+      A('L', [0.1 * env, 0, -0.15 * env]); A('R', [0.1 * env, 0, 0.15 * env]);
+    } else if (n === 'wink') {
+      this._setMorph('ウィンク', env * 0.9);
+    }
+  }
+
+  _applyPoseOff() {
+    const o = this.poseOff;
+    const up = this.bones['上半身'];
+    if (up) { up.rotation.y = o.leanY; }  // lean.x 在呼吸段统一：baseLean + poseOff.lean + br
+    const add = (name, dx, dy, dz) => {
+      const b = this.bones[name]; if (!b) return;
+      b.rotation.x += dx; b.rotation.y += dy; b.rotation.z += dz;
+      const d = this.bones[name + 'D'];
+      if (d) { d.rotation.x += dx; d.rotation.y += dy; d.rotation.z += dz; }
+    };
+    add('左腕', o.armL[0], o.armL[1], o.armL[2]);
+    add('右腕', o.armR[0], o.armR[1], o.armR[2]);
+    add('左ひじ', o.elbL, 0, 0); add('右ひじ', o.elbR, 0, 0);
+    add('左手首', 0, 0, o.wristL); add('右手首', 0, 0, o.wristR);
+    add('左足', o.hipL, 0, 0); add('右足', o.hipR, 0, 0);
   }
 
   update(dt) {
     if (!this.mesh || !this.anchor.visible) return;
     this.t += dt;
-    // 呼吸：上半身轻微起伏
+    // —— 空闲手势调度 ——
+    if (!this.grab.active && !this.gest) {
+      this.nextIdle -= dt;
+      if (this.nextIdle <= 0) {
+        const g = this._pickIdle();
+        const dur = g === 'swingFoot' ? 2.8 : g === 'stretch' ? 2.4 : 1.8 + Math.random();
+        this._playGest(g, dur);
+        if (g === 'yawn') this._face(['あ', 'なごみ'], 1.6, 0.75);
+        this.nextIdle = (this.mode === 'think' ? 3.5 : 5.5) + Math.random() * 4;
+      }
+    }
+    if (this.gest) {
+      this.gest.t += dt;
+      const u = Math.min(1, this.gest.t / this.gest.dur);
+      this._evalGest(u);
+      if (u >= 1) {
+        if (this.gest.name === 'wink') this._setMorph('ウィンク', 0);
+        this.gest = null;
+        // 清 poseOff
+        Object.assign(this.poseOff, { lean: 0, leanY: 0, armL: [0,0,0], armR: [0,0,0], elbL: 0, elbR: 0, wristL: 0, wristR: 0, hipL: 0, hipR: 0, headP: 0 });
+      }
+    }
+
+    // 身体手势：恢复坐姿 rest → 叠加 poseOff（拿子时手臂交给 IK）
+    if (!this.grab.active) {
+      this._resetArms();
+      for (const side of ['左', '右']) for (const n of ['足', 'ひざ', '足首']) {
+        const b = this.bones[side + n];
+        if (b && this.rest.has(b)) b.quaternion.copy(this.rest.get(b));
+        const d = this.bones[side + n + 'D'];
+        if (d && this.rest.has(d)) d.quaternion.copy(this.rest.get(d));
+      }
+      this._applyPoseOff();
+    }
+
+    // 呼吸叠在手势之上
     const br = Math.sin(this.t * 1.7);
     const up = this.bones['上半身'], up2 = this.bones['上半身2'];
-    if (up) up.rotation.x = this.baseLean + br * 0.012;
+    if (up) up.rotation.x = this.baseLean + this.poseOff.lean + br * 0.012;
     if (up2) up2.rotation.x = br * 0.01;
     const sh = [this.bones['左肩'], this.bones['右肩']];
-    sh.forEach((b, i) => { if (b) b.rotation.z = (i ? -1 : 1) * br * 0.012; });
-    // 头：歪头 / 看向
+    sh.forEach((b, i) => { if (b) b.rotation.z += (i ? -1 : 1) * br * 0.012; });
+
+    // 头
     this.tilt += (this.tiltTarget - this.tilt) * Math.min(1, dt * 4);
     this.lookYaw += (this.lookYawTarget - this.lookYaw) * Math.min(1, dt * 3);
     const head = this.bones['頭'], neck = this.bones['首'];
-    if (head) head.rotation.set(0.03 + Math.sin(this.t * 0.6) * 0.02, this.lookYaw, this.tilt);
-    if (neck) neck.rotation.set(0.05, this.lookYaw * 0.4, this.tilt * 0.3);
+    const hp = this.poseOff.headP;
+    if (head) head.rotation.set(0.03 + Math.sin(this.t * 0.6) * 0.02 + hp, this.lookYaw, this.tilt);
+    if (neck) neck.rotation.set(0.05 + hp * 0.4, this.lookYaw * 0.4, this.tilt * 0.3);
+
     // 眨眼
     this.nextBlink -= dt;
-    if (this.nextBlink <= 0 && this.blinkT < 0) { this.blinkT = 0; this.nextBlink = 2.5 + Math.random() * 3.5; }
+    if (this.nextBlink <= 0 && this.blinkT < 0) {
+      this.blinkT = 0;
+      this.nextBlink = (this.talk.active ? 3.5 : 2.5) + Math.random() * 3.5;
+    }
     if (this.blinkT >= 0) {
       this.blinkT += dt;
       const k = this.blinkT / 0.16;
       this._setMorph('まばたき', k < 1 ? Math.sin(k * Math.PI) : 0);
       if (k >= 1) this.blinkT = -1;
     }
-    // 表情
     if (this.expr) {
       const e = this.expr; e.t += dt;
-      const u = e.t / e.dur;
-      const w = u < 0.15 ? u / 0.15 : u > 0.75 ? Math.max(0, (1 - u) / 0.25) : 1;
-      for (const n of e.names) this._setMorph(n, u >= 1 ? 0 : w * e.peak);
-      if (u >= 1) this.expr = null;
+      const uu = e.t / e.dur;
+      const w = uu < 0.15 ? uu / 0.15 : uu > 0.75 ? Math.max(0, (1 - uu) / 0.25) : 1;
+      for (const n of e.names) this._setMorph(n, uu >= 1 ? 0 : w * e.peak);
+      if (uu >= 1) this.expr = null;
     }
+
+    this._updateMouth(dt);
     if (this.grab.active) this._solveGrab();
     this._applyBoneMorphs();
     this._renderAvatar();
   }
+
 
   dispose() {
     if (this.anchor) {
