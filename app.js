@@ -3,6 +3,7 @@ import { chibiSVG, backgroundSVG } from './chibi.js';
 import { lemalin, blinkFrame, drawGrid, drawBackground } from './pixel.js';
 import { Board3D } from './board3d.js';
 import { LemalinMMD } from './lemalin-mmd.js';
+import { LemalinVoice } from './voice.js';
 
 const $ = s => document.querySelector(s);
 
@@ -79,6 +80,7 @@ const L = {
 const pick = a => a[Math.floor(Math.random() * a.length)];
 let mood = 'sleepy', frame = 0, tick2 = 0;
 let lm = null, lmLoading = false;
+const voice = new LemalinVoice();
 const artPixel = () => $('#artStyle').value === 'pixel';
 function drawAvatar() {
   if (!artPixel()) { $('#avatar').innerHTML = chibiSVG(mood); return; }
@@ -90,7 +92,11 @@ function drawAvatar() {
 setInterval(() => { tick2++; frame = tick2 % 2; if (artPixel()) drawAvatar(); }, 700);
 function say(t, m = 'sleepy') {
   $('#bubble').textContent = t; mood = m; drawAvatar();
-  if (lm && lm.loaded && lm.visible) lm.speak(t);
+  const dur = voice.play(t);            // 0 = 无音频/未解锁/关闭 → 文字口型
+  if (lm && lm.loaded && lm.visible) {
+    if (dur) lm.stopSpeak();            // 口型改由 voice.onAmp → setMouthFromAudio
+    else lm.speak(t);
+  }
 }
 function drawBg() {
   if (artPixel()) { $('#bgArt').innerHTML = '<canvas class="px"></canvas>'; drawBackground($('#bgArt canvas')); }
@@ -638,6 +644,9 @@ async function loadLemalin(pw) {
     lm.setVisible($('#showLm').checked);
     lm.attachAvatar($('#avatar3d'));
     syncAvatar();
+    voice.onAmp = amp => { if (lm && lm.loaded && lm.visible) lm.setMouthFromAudio({ amp }); };
+    try { const n = await voice.load(pw); lmStatus('恶毒已在对面就座 🌙 · 语音 ' + n + ' 句', 'ok'); }
+    catch (ve) { console.warn('[voice]', ve); }
     say('哈啊……我坐到对面来了哦，指挥官，好好下吧~', 'happy');
   } catch (e) {
     inst.dispose();
@@ -656,6 +665,12 @@ $('#lmRemember').onchange = () => {
   localStorage.lm3dRemember = $('#lmRemember').checked ? '1' : '0';
   if (!$('#lmRemember').checked) delete localStorage.lm3dPw;
 };
+$('#voiceOn').checked = localStorage.lm3dVoice !== '0';
+voice.setEnabled($('#voiceOn').checked);
+$('#voiceOn').onchange = () => { voice.setEnabled($('#voiceOn').checked); localStorage.lm3dVoice = $('#voiceOn').checked ? '1' : '0'; };
+$('#voiceVol').value = localStorage.lm3dVol || '80';
+voice.setVolume((+$('#voiceVol').value) / 100);
+$('#voiceVol').oninput = () => { voice.setVolume((+$('#voiceVol').value) / 100); localStorage.lm3dVol = $('#voiceVol').value; };
 $('#showLm').onchange = () => {
   const on = $('#showLm').checked;
   localStorage.lm3dShow = on ? '1' : '0';
