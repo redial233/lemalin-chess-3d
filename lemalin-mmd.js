@@ -81,10 +81,22 @@ export class LemalinMMD {
     this.nextIdle = 3.5;
     this.mode = 'idle';  // idle | think | grab
     this.poseOff = { lean: 0, leanY: 0, armL: [0,0,0], armR: [0,0,0], elbL: 0, elbR: 0, wristL: 0, wristR: 0, hipL: 0, hipR: 0, headP: 0 };
-    this.smoothPose = structuredClone(this.poseOff);
-    this.mouthWeights = Object.fromEntries(['あ', 'い', 'う', 'え', 'お', 'ん'].map(n => [n, 0]));
+    this._ensureAnimationState();
     this.blobUrls = [];
     this._frame = dt => this.update(dt);
+  }
+
+  // A development preview may retain the unlocked actor while replacing its
+  // prototype. Initialize newly introduced state once, not every frame, so an
+  // older instance does not throw inside the board's frame callback forever.
+  _ensureAnimationState() {
+    if (!this.smoothPose) {
+      this.smoothPose = Object.fromEntries(Object.entries(this.poseOff)
+        .map(([key, value]) => [key, Array.isArray(value) ? value.slice() : value]));
+    }
+    if (!this.mouthWeights) {
+      this.mouthWeights = Object.fromEntries(['あ', 'い', 'う', 'え', 'お', 'ん'].map(n => [n, 0]));
+    }
   }
 
   get loaded() { return !!this.mesh; }
@@ -445,6 +457,7 @@ export class LemalinMMD {
   canGrab() { return !!(this.mesh && this.loaded && this.visible && this.board.actorRoot.visible); }
   /** 开始一次拿子：按目标在她左/右侧选手 */
   beginGrab(worldPt) {
+    this._ensureAnimationState();
     const l = this.anchor.worldToLocal(worldPt.clone());
     this.grab.side = l.x >= 0 ? '左' : '右';
     this.grab.active = true;
@@ -939,6 +952,7 @@ export class LemalinMMD {
 
   update(dt) {
     if (!this.mesh || !this.anchor.visible) return;
+    this._ensureAnimationState();
     dt = Math.min(0.05, Math.max(0, Number.isFinite(dt) ? dt : 0));
     this.t += dt;
     // —— 空闲手势调度 ——
