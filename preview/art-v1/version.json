@@ -1,0 +1,7 @@
+{
+  "preview": "art-v1",
+  "candidate_commit": "c3a41639be5bad3ddfb69d71bf06c38da561431e",
+  "runtime_commit": "ab8384b",
+  "baseline_commit": "fd024dfe19737c3a97707ef8658c64f10b8359c7",
+  "note": "Isolated additive preview; original root files unchanged. Encrypted model assets unchanged."
+}
