@@ -1,0 +1,7 @@
+{
+  "name": "lemalin-chess-3d",
+  "private": true,
+  "type": "module",
+  "scripts": {"test": "node --test tests/*.test.js", "check": "node --check lemalin-mmd.js && node --check board3d.js && node --check app.js"},
+  "devDependencies": {"three": "0.170.0"}
+}

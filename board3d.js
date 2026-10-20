@@ -667,7 +667,7 @@ export class Board3D {
       const herSide = this.engineColor === 'b' ? -1 : 1;
       const segs = [];
       let capFaded = false;
-      const ease = u => u * u * (3 - 2 * u);
+      const ease = u => u * u * u * (u * (u * 6 - 15) + 10); // zero endpoint velocity AND acceleration
       const lerp = (a, b, u) => a.clone().lerp(b, u);
       // —— 先处理被吃的子：拿到棋盘旁边 ——
       if (capObj) {
@@ -676,22 +676,22 @@ export class Board3D {
         const tray = V((capPos.x >= 0 ? 1 : -1) * 4.8, cH, herSide * 3.4);
         segs.push({ tag: 'reach', d: 0.45, p: u => C.clone().addScaledVector(UP, 0.7), w: u => ease(u), g: () => 0 });
         segs.push({ tag: 'reach', d: 0.15, p: u => lerp(C.clone().addScaledVector(UP, 0.7), C, ease(u)), w: () => 1, g: () => 0 });
-        segs.push({ tag: 'capgrip', d: 0.1, p: () => C, w: () => 1, g: u => u });
+        segs.push({ tag: 'capgrip', d: 0.1, p: () => C, w: () => 1, g: u => ease(u) });
         segs.push({ tag: 'caplift', d: 0.2, p: u => lerp(C, C.clone().addScaledVector(UP, LIFT), ease(u)), w: () => 1, g: () => 1, hold: capObj, hH: cH });
-        segs.push({ tag: 'capcarry', d: 0.45, p: u => { const v = lerp(C.clone().addScaledVector(UP, LIFT), tray.clone().addScaledVector(UP, LIFT * 0.6), ease(u)); v.y += Math.sin(u * Math.PI) * 0.3; return v; }, w: () => 1, g: () => 1, hold: capObj, hH: cH });
+        segs.push({ tag: 'capcarry', d: 0.45, p: u => { const v = lerp(C.clone().addScaledVector(UP, LIFT), tray.clone().addScaledVector(UP, LIFT * 0.6), ease(u)); v.y += Math.sin(u * Math.PI) ** 2 * 0.3; return v; }, w: () => 1, g: () => 1, hold: capObj, hH: cH });
         segs.push({ tag: 'caplower', d: 0.18, p: u => lerp(tray.clone().addScaledVector(UP, LIFT * 0.6), tray, ease(u)), w: () => 1, g: () => 1, hold: capObj, hH: cH });
-        segs.push({ tag: 'caprelease', d: 0.1, p: () => tray, w: () => 1, g: u => 1 - u, onEnd: () => { capFaded = true; this._fadeOutPiece(capObj.mesh); } });
-        segs.push({ tag: 'transit', d: 0.4, p: u => { const v = lerp(tray, A.clone().addScaledVector(UP, 0.7), ease(u)); v.y += Math.sin(u * Math.PI) * 0.4; return v; }, w: () => 1, g: () => 0 });
+        segs.push({ tag: 'caprelease', d: 0.1, p: () => tray, w: () => 1, g: u => 1 - ease(u), onEnd: () => { capFaded = true; this._fadeOutPiece(capObj.mesh); } });
+        segs.push({ tag: 'transit', d: 0.4, p: u => { const v = lerp(tray, A.clone().addScaledVector(UP, 0.7), ease(u)); v.y += Math.sin(u * Math.PI) ** 2 * 0.4; return v; }, w: () => 1, g: () => 0 });
       } else {
         segs.push({ d: 0.5, p: () => A.clone().addScaledVector(UP, 0.7), w: u => ease(u), g: () => 0 });
       }
       // —— 拿起要走的子 ——
       segs.push({ d: 0.18, p: u => lerp(A.clone().addScaledVector(UP, 0.7), A, ease(u)), w: () => 1, g: () => 0 });
-      segs.push({ d: 0.12, p: () => A, w: () => 1, g: u => u, tag: 'grip' });
+      segs.push({ d: 0.12, p: () => A, w: () => 1, g: u => ease(u), tag: 'grip' });
       segs.push({ d: 0.22, p: u => lerp(A, A.clone().addScaledVector(UP, LIFT), ease(u)), w: () => 1, g: () => 1, hold: fromObj, hH: gH, tag: 'lift' });
-      segs.push({ d: 0.5, p: u => { const v = lerp(A.clone().addScaledVector(UP, LIFT), Bp.clone().addScaledVector(UP, LIFT), ease(u)); v.y += Math.sin(u * Math.PI) * 0.35; return v; }, w: () => 1, g: () => 1, hold: fromObj, hH: gH, rook: true, tag: 'carry' });
+      segs.push({ d: 0.5, p: u => { const v = lerp(A.clone().addScaledVector(UP, LIFT), Bp.clone().addScaledVector(UP, LIFT), ease(u)); v.y += Math.sin(u * Math.PI) ** 2 * 0.35; return v; }, w: () => 1, g: () => 1, hold: fromObj, hH: gH, rook: true, tag: 'carry' });
       segs.push({ d: 0.22, p: u => lerp(Bp.clone().addScaledVector(UP, LIFT), Bp, ease(u)), w: () => 1, g: () => 1, hold: fromObj, hH: gH, tag: 'lower' });
-      segs.push({ d: 0.1, p: () => Bp, w: () => 1, g: u => 1 - u, tag: 'release', onEnd: () => {
+      segs.push({ d: 0.1, p: () => Bp, w: () => 1, g: u => 1 - ease(u), tag: 'release', onEnd: () => {
         this.bursts.burst(end.x, 0.2, end.z, { count: 8, color: mv.color === 'w' ? 0xc8b6ff : 0x8fe3ff, speed: 1.0, life: 0.3 });
         placed = true;
         this._finishMovePlacement(mv, boardAfter, fromObj, end, rookAnim, isPromo);
